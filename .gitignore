@@ -1,0 +1,14 @@
+# Build artifacts
+*.o
+*.elf
+*.iso
+*.map
+*.bin
+*.tar
+
+# Generated directories
+isodir/
+
+# OS specific
+.DS_Store
+Thumbs.db
