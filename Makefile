@@ -16,11 +16,11 @@ FS_DIR := src/fs
 
 # Source files
 KERNEL_SRC := $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/common.c
-DRIVER_SRC := $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/ide.c $(DRIVER_DIR)/keyboard.c
+DRIVER_SRC := $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/ide.c
 FS_SRC := $(FS_DIR)/simplefs.c
 
 # Object files
-OBJS := boot.o interrupts.o vga.o ide.o keyboard.o simplefs.o
+OBJS := boot.o interrupts.o vga.o ide.o simplefs.o
 
 all: os.iso
 
@@ -36,9 +36,6 @@ vga.o: $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/vga.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
 
 ide.o: $(DRIVER_DIR)/ide.c $(DRIVER_DIR)/ide.h $(KERNEL_DIR)/common.h
-	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
-
-keyboard.o: $(DRIVER_DIR)/keyboard.c $(DRIVER_DIR)/keyboard.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
 
 # Filesystem

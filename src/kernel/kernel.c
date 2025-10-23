@@ -3,7 +3,6 @@
 #include "simplefs.h"
 #include "vga.h"
 #include "ide.h"
-#include "keyboard.h"
 
 extern char __kernel_base[];
 extern char __stack_top[];
@@ -69,13 +68,7 @@ void putchar(char ch) {
 }
 
 long getchar(void) {
-    // Try keyboard first (for VirtualBox)
-    long ch = kb_getchar();
-    if (ch >= 0) {
-        return ch;
-    }
-    
-    // Fall back to serial (for QEMU)
+    // Serial port input (for QEMU)
     if ((inb(PORT_COM1 + 5) & 1) == 0)
         return -1;
     return inb(PORT_COM1);
@@ -117,7 +110,6 @@ void idt_set_gate(uint8_t num, uint32_t handler, uint16_t sel, uint8_t flags) {
 
 // Interrupt handlers (assembly stubs will call these)
 extern void isr0(void);
-extern void isr33(void);  // Keyboard interrupt (IRQ1)
 extern void isr128(void); // Syscall interrupt
 
 // PIC (Programmable Interrupt Controller) initialization
@@ -132,8 +124,8 @@ void pic_init(void) {
     outb(0x21, 0x01);  // 8086 mode (ICW4)
     outb(0xA1, 0x01);
     
-    // Unmask only keyboard interrupt (IRQ1)
-    outb(0x21, 0xFD);  // 11111101 - only IRQ1 enabled
+    // Mask all interrupts (we only use syscalls)
+    outb(0x21, 0xFF);  // Disable all master PIC interrupts
     outb(0xA1, 0xFF);  // Disable all slave PIC interrupts
 }
 
@@ -143,14 +135,11 @@ void idt_init(void) {
 
     memset(&idt, 0, sizeof(struct idt_entry) * 256);
 
-    // Set up keyboard interrupt (IRQ1 = INT 0x21)
-    idt_set_gate(33, (uint32_t)isr33, 0x08, 0x8E); // 0x8E = kernel interrupt gate
-    
     // Set up syscall gate (int 0x80)
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE); // 0xEE = user-level interrupt gate
 
     load_idt(&idtp);
-    pic_init();  // Initialize PIC after setting up IDT
+    pic_init();  // Initialize PIC
 }
 
 // Process management
@@ -298,14 +287,12 @@ void kernel_main(void) {
     
     printf("\n\nx86 OS - SimpleFS (IDE Disk)\n");
     printf("=====================================\n");
+    printf("Input: Serial Console (QEMU)\n");
     printf("Output: VGA + Serial Console\n");
     
-    // Initialize interrupts and keyboard
+    // Initialize interrupts
     idt_init();
-    keyboard_init();
     __asm__ __volatile__("sti");  // Enable interrupts
-    
-    printf("Keyboard: Enabled (IRQ1)\n");
     
     // Initialize IDE disk
     ide_init();

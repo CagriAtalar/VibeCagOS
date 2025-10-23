@@ -40,18 +40,6 @@ isr_common:
     
     iret
 
-# Keyboard interrupt handler (IRQ1 = INT 0x21)
-.global isr33
-.extern keyboard_handler
-isr33:
-    pushal                      # Save all registers
-    cld                         # Clear direction flag
-    call keyboard_handler       # Call C handler
-    movb $0x20, %al            # EOI signal
-    outb %al, $0x20            # Send to PIC
-    popal                       # Restore registers
-    iret
-
 # Dummy ISR for other interrupts
 .global isr0
 isr0:
