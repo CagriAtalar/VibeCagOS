@@ -1,4 +1,4 @@
-# iksseksen - x86 Operating System
+# CagOS - x86 Operating System
 
 A minimal x86 (i386) operating system with **inode-based file system** and **persistent disk storage**.
 
@@ -127,7 +127,7 @@ Total: 1 files
 ## Project Structure
 
 ```
-iksseksen/
+VibeCagOS/
 ├── src/
 │   ├── kernel/        # Core kernel code
 │   │   ├── kernel.c   # Main kernel
@@ -202,5 +202,12 @@ This x86 port features:
 
 ---
 
-**iksseksen** (Turkish: "eighty-six" = x86)  
+**VibeCagOS İksseksen v0.01**  
 Educational x86 operating system with real disk I/O! 🚀
+
+There are some problems. 
+    I can't write first file i created. But other files okay for sure.
+    Pagination and page table implementation does exist but not used yet.
+    VirtualBox Version doesn't work, it just loops even though there are no keyboard input.
+    
+
