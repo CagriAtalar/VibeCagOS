@@ -1,13 +1,19 @@
 # Build artifacts
 *.o
 *.elf
-*.iso
-*.map
 *.bin
-*.tar
-
-# Generated directories
+*.map
+os.iso
+disk.img
+disk.vdi
 isodir/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
 
 # OS specific
 .DS_Store
