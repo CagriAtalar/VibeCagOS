@@ -321,8 +321,18 @@ void kernel_main(void) {
                     cmdline[i] = '\0';
                     break;
                 }
-                putchar(ch);
-                cmdline[i++] = ch;
+                else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
+                    if (i > 0) {  // Only if not at beginning of prompt
+                        i--;  // Move cursor back
+                        putchar('\b');  // Move cursor back
+                        putchar(' ');   // Erase character
+                        putchar('\b');  // Move cursor back again
+                    }
+                }
+                else {
+                    putchar(ch);
+                    cmdline[i++] = ch;
+                }
             }
         }
         cmdline[i] = '\0';
@@ -368,8 +378,18 @@ void kernel_main(void) {
                             line[line_len] = '\0';
                             break;
                         }
-                        putchar(ch);
-                        line[line_len++] = ch;
+                        else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
+                            if (line_len > 0) {  // Only if not at beginning of line
+                                line_len--;  // Move cursor back
+                                putchar('\b');  // Move cursor back
+                                putchar(' ');   // Erase character
+                                putchar('\b');  // Move cursor back again
+                            }
+                        }
+                        else {
+                            putchar(ch);
+                            line[line_len++] = ch;
+                        }
                     }
                 }
                 line[line_len] = '\0';
@@ -416,8 +436,18 @@ void kernel_main(void) {
                         confirm[j] = '\0';
                         break;
                     }
-                    putchar(ch);
-                    confirm[j++] = ch;
+                    else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
+                        if (j > 0) {  // Only if not at beginning
+                            j--;  // Move cursor back
+                            putchar('\b');  // Move cursor back
+                            putchar(' ');   // Erase character
+                            putchar('\b');  // Move cursor back again
+                        }
+                    }
+                    else {
+                        putchar(ch);
+                        confirm[j++] = ch;
+                    }
                 }
             }
             confirm[j] = '\0';
