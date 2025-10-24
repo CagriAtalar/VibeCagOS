@@ -90,3 +90,19 @@ static inline void enable_paging(void) {
     __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0));
 }
 
+// Syscall numbers
+#define SYS_PUTCHAR    1
+#define SYS_GETCHAR    2
+#define SYS_LIST_FILES 3
+#define SYS_READ_FILE  4
+#define SYS_CREATE_FILE 5
+#define SYS_WRITE_FILE 6
+#define SYS_DELETE_FILE 7
+#define SYS_FORMAT_FS  8
+#define SYS_EXIT       9
+
+// Function declarations
+void enter_user_mode(void);
+uint32_t parse_ip_address(const char *ip_str);
+long syscall(int num, uint32_t arg1, uint32_t arg2, uint32_t arg3);
+

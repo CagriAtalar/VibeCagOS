@@ -21,17 +21,7 @@ typedef uint32_t vaddr_t;
 #define va_arg   __builtin_va_arg
 #define PAGE_SIZE 4096
 
-// System call numbers
-#define SYS_PUTCHAR 1
-#define SYS_GETCHAR 2
-#define SYS_EXIT    3
-#define SYS_READFILE  4
-#define SYS_WRITEFILE 5
-#define SYS_ADDFILE 6
-#define SYS_READF 7
-#define SYS_ADDF 8
-#define SYS_WRITEF 9
-#define SYS_LS 10
+// System call numbers (moved to kernel.h)
 
 void *memset(void *buf, char c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);

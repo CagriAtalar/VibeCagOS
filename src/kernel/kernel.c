@@ -260,6 +260,52 @@ void handle_syscall(struct trap_frame *f) {
                 yield();
             }
             break;
+        case SYS_LIST_FILES:
+            {
+                char *buffer = (char*)f->ebx;
+                int max_len = (int)f->ecx;
+                simplefs_ls();  // For now, just call ls directly
+                f->eax = 0;
+            }
+            break;
+        case SYS_READ_FILE:
+            {
+                char *filename = (char*)f->ebx;
+                char *buffer = (char*)f->ecx;
+                int max_len = (int)f->edx;
+                int ret = simplefs_read(filename, buffer, max_len);
+                f->eax = ret;
+            }
+            break;
+        case SYS_CREATE_FILE:
+            {
+                char *filename = (char*)f->ebx;
+                int ret = simplefs_create(filename);
+                f->eax = ret;
+            }
+            break;
+        case SYS_WRITE_FILE:
+            {
+                char *filename = (char*)f->ebx;
+                char *content = (char*)f->ecx;
+                int content_len = (int)f->edx;
+                int ret = simplefs_write(filename, content, content_len);
+                f->eax = ret;
+            }
+            break;
+        case SYS_DELETE_FILE:
+            {
+                char *filename = (char*)f->ebx;
+                int ret = simplefs_delete(filename);
+                f->eax = ret;
+            }
+            break;
+        case SYS_FORMAT_FS:
+            {
+                simplefs_format();
+                f->eax = 0;
+            }
+            break;
         case SYS_EXIT:
             printf("process %d exited\n", current_proc->pid);
             current_proc->state = PROC_EXITED;
@@ -277,6 +323,18 @@ void handle_interrupt(struct trap_frame *f) {
         PANIC("unexpected interrupt: int_no=%d, err=%d, eip=%x\n", 
               f->int_no, f->err_code, f->eip);
     }
+}
+
+// Syscall wrapper function for user space
+long syscall(int num, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    long result;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a" (result)
+        : "a" (num), "b" (arg1), "c" (arg2), "d" (arg3)
+        : "memory"
+    );
+    return result;
 }
 
 void kernel_main(void) {
@@ -306,178 +364,8 @@ void kernel_main(void) {
     }
     printf("\n");
     
-    // Simple shell without processes
-    while (1) {
-        printf("> ");
-        char cmdline[128];
-        int i = 0;
-        
-        // Read command
-        while (i < (int)sizeof(cmdline) - 1) {
-            long ch = getchar();
-            if (ch >= 0) {
-                if (ch == '\r' || ch == '\n') {
-                    putchar('\n');
-                    cmdline[i] = '\0';
-                    break;
-                }
-                else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
-                    if (i > 0) {  // Only if not at beginning of prompt
-                        i--;  // Move cursor back
-                        putchar('\b');  // Move cursor back
-                        putchar(' ');   // Erase character
-                        putchar('\b');  // Move cursor back again
-                    }
-                }
-                else {
-                    putchar(ch);
-                    cmdline[i++] = ch;
-                }
-            }
-        }
-        cmdline[i] = '\0';
-        
-        // Parse and execute commands
-        if (strcmp(cmdline, "hello") == 0) {
-            printf("Hello from x86 OS with SimpleFS!\n");
-        }
-        else if (strcmp(cmdline, "ls") == 0) {
-            simplefs_ls();
-        }
-        else if (strncmp(cmdline, "cat ", 4) == 0) {
-            char *filename = cmdline + 4;
-            simplefs_cat(filename);
-        }
-        else if (strncmp(cmdline, "create ", 7) == 0) {
-            char *filename = cmdline + 7;
-            int ret = simplefs_create(filename);
-            if (ret == 0) {
-                printf("File '%s' created successfully\n", filename);
-            } else if (ret == -1) {
-                printf("Error: File '%s' already exists\n", filename);
-            } else {
-                printf("Error: No space for new files\n");
-            }
-        }
-        else if (strncmp(cmdline, "write ", 6) == 0) {
-            char *filename = cmdline + 6;
-            printf("Enter content (end with empty line):\n");
-            char content[2048];
-            int content_len = 0;
-            
-            while (content_len < 2000) {
-                printf("| ");
-                char line[128];
-                int line_len = 0;
-                
-                while (line_len < 127) {
-                    long ch = getchar();
-                    if (ch >= 0) {
-                        if (ch == '\r' || ch == '\n') {
-                            putchar('\n');
-                            line[line_len] = '\0';
-                            break;
-                        }
-                        else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
-                            if (line_len > 0) {  // Only if not at beginning of line
-                                line_len--;  // Move cursor back
-                                putchar('\b');  // Move cursor back
-                                putchar(' ');   // Erase character
-                                putchar('\b');  // Move cursor back again
-                            }
-                        }
-                        else {
-                            putchar(ch);
-                            line[line_len++] = ch;
-                        }
-                    }
-                }
-                line[line_len] = '\0';
-                
-                // Empty line ends input
-                if (line_len == 0) {
-                    break;
-                }
-                
-                // Add line to content
-                for (int i = 0; i < line_len && content_len < 2000; i++) {
-                    content[content_len++] = line[i];
-                }
-                if (content_len < 2000) {
-                    content[content_len++] = '\n';
-                }
-            }
-            
-            int ret = simplefs_write(filename, content, content_len);
-            if (ret >= 0) {
-                printf("Wrote %d bytes to '%s'\n", ret, filename);
-            } else {
-                printf("Error: File '%s' not found\n", filename);
-            }
-        }
-        else if (strncmp(cmdline, "rm ", 3) == 0) {
-            char *filename = cmdline + 3;
-            int ret = simplefs_delete(filename);
-            if (ret == 0) {
-                printf("File '%s' deleted\n", filename);
-            } else {
-                printf("Error: File '%s' not found\n", filename);
-            }
-        }
-        else if (strcmp(cmdline, "format") == 0) {
-            printf("Are you sure? This will erase all data! Type 'yes' to confirm: ");
-            char confirm[10];
-            int j = 0;
-            while (j < 9) {
-                long ch = getchar();
-                if (ch >= 0) {
-                    if (ch == '\r' || ch == '\n') {
-                        putchar('\n');
-                        confirm[j] = '\0';
-                        break;
-                    }
-                    else if (ch == '\b' || ch == 127) {  // Backspace or DEL key
-                        if (j > 0) {  // Only if not at beginning
-                            j--;  // Move cursor back
-                            putchar('\b');  // Move cursor back
-                            putchar(' ');   // Erase character
-                            putchar('\b');  // Move cursor back again
-                        }
-                    }
-                    else {
-                        putchar(ch);
-                        confirm[j++] = ch;
-                    }
-                }
-            }
-            confirm[j] = '\0';
-            if (strcmp(confirm, "yes") == 0) {
-                simplefs_format();
-            } else {
-                printf("Format cancelled.\n");
-            }
-        }
-        else if (strcmp(cmdline, "help") == 0) {
-            printf("Available commands:\n");
-            printf("  hello           - Print greeting\n");
-            printf("  ls              - List all files\n");
-            printf("  cat <file>      - Display file contents\n");
-            printf("  create <file>   - Create new file\n");
-            printf("  write <file>    - Write content to file\n");
-            printf("  rm <file>       - Delete file\n");
-            printf("  format          - Format filesystem\n");
-            printf("  help            - Show this help\n");
-            printf("  exit            - Exit shell\n");
-        }
-        else if (strcmp(cmdline, "exit") == 0) {
-            printf("Goodbye!\n");
-            break;
-        }
-        else if (cmdline[0] != '\0') {
-            printf("Unknown command: %s\n", cmdline);
-            printf("Type 'help' for available commands\n");
-        }
-    }
+    // Enter user mode
+    enter_user_mode();
     
     printf("\nKernel shutting down...\n");
     while (1) { __asm__ __volatile__("hlt"); }

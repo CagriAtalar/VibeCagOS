@@ -15,7 +15,7 @@ DRIVER_DIR := src/drivers
 FS_DIR := src/fs
 
 # Source files
-KERNEL_SRC := $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/common.c
+KERNEL_SRC := $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/common.c $(KERNEL_DIR)/user.c
 DRIVER_SRC := $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/ide.c
 FS_SRC := $(FS_DIR)/simplefs.c
 
