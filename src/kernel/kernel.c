@@ -3,6 +3,13 @@
 #include "simplefs.h"
 #include "vga.h"
 #include "ide.h"
+#include "pci.h"
+#include "rtl8139.h"
+#include "ethernet.h"
+#include "arp.h"
+#include "ipv4.h"
+#include "icmp.h"
+#include "netconfig.h"
 
 extern char __kernel_base[];
 extern char __stack_top[];
@@ -279,6 +286,42 @@ void handle_interrupt(struct trap_frame *f) {
     }
 }
 
+/* Parse dotted-decimal IP string to host byte order uint32_t.
+   Returns true on success, false on parse error. */
+static bool parse_ipv4(const char *str, uint32_t *ip_out) {
+    uint32_t octets[4];
+    int octet_idx = 0;
+    uint32_t val = 0;
+    bool has_digit = false;
+
+    for (int i = 0; ; i++) {
+        char c = str[i];
+        if (c >= '0' && c <= '9') {
+            val = val * 10 + (c - '0');
+            if (val > 255)
+                return false;
+            has_digit = true;
+        } else if (c == '.' || c == '\0') {
+            if (!has_digit || octet_idx >= 4)
+                return false;
+            octets[octet_idx++] = val;
+            val = 0;
+            has_digit = false;
+            if (c == '\0')
+                break;
+        } else {
+            return false;
+        }
+    }
+
+    if (octet_idx != 4)
+        return false;
+
+    *ip_out = (octets[0] << 24) | (octets[1] << 16) |
+              (octets[2] << 8)  |  octets[3];
+    return true;
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     
@@ -296,6 +339,8 @@ void kernel_main(void) {
     
     // Initialize IDE disk
     ide_init();
+    pci_init();
+    nic_init();
     printf("\n");
     
     // Try to mount filesystem, if fails, format it
@@ -457,6 +502,67 @@ void kernel_main(void) {
                 printf("Format cancelled.\n");
             }
         }
+        else if (strncmp(cmdline, "ping ", 5) == 0) {
+            char *ip_str = cmdline + 5;
+            /* Skip leading spaces */
+            while (*ip_str == ' ') ip_str++;
+
+            if (*ip_str == '\0') {
+                printf("Usage: ping <ip>\n");
+            } else {
+                uint32_t target_ip;
+                if (!parse_ipv4(ip_str, &target_ip)) {
+                    printf("Error: Invalid IP address '%s'\n", ip_str);
+                } else {
+                    /* Resolve ARP first (up to 3 attempts) */
+                    uint8_t dst_mac[6];
+                    uint32_t next_hop = target_ip;
+                    if ((target_ip & NET_NETMASK) != (NET_IP & NET_NETMASK))
+                        next_hop = NET_GATEWAY;
+
+                    bool arp_ok = false;
+                    for (int attempt = 0; attempt < 3; attempt++) {
+                        if (arp_resolve(next_hop, dst_mac)) {
+                            arp_ok = true;
+                            break;
+                        }
+                    }
+
+                    if (!arp_ok) {
+                        printf("Host unreachable\n");
+                    } else {
+                        printf("PING %d.%d.%d.%d: %d bytes of data\n",
+                               (target_ip >> 24) & 0xFF,
+                               (target_ip >> 16) & 0xFF,
+                               (target_ip >> 8) & 0xFF,
+                               target_ip & 0xFF,
+                               PING_DATA_LEN);
+
+                        struct ping_result res;
+                        ping(target_ip, 4, &res);
+
+                        int loss = 0;
+                        if (res.sent > 0)
+                            loss = ((res.sent - res.received) * 100) / res.sent;
+                        int avg_ms = 0;
+                        if (res.received > 0)
+                            avg_ms = res.total_ms / res.received;
+
+                        printf("--- %d.%d.%d.%d ping statistics ---\n",
+                               (target_ip >> 24) & 0xFF,
+                               (target_ip >> 16) & 0xFF,
+                               (target_ip >> 8) & 0xFF,
+                               target_ip & 0xFF);
+                        printf("%d packets transmitted, %d received, %d%% packet loss\n",
+                               res.sent, res.received, loss);
+                        if (res.received > 0) {
+                            printf("min/avg/max = %d/%d/%d ms\n",
+                                   res.min_ms, avg_ms, res.max_ms);
+                        }
+                    }
+                }
+            }
+        }
         else if (strcmp(cmdline, "help") == 0) {
             printf("Available commands:\n");
             printf("  hello           - Print greeting\n");
@@ -466,6 +572,7 @@ void kernel_main(void) {
             printf("  write <file>    - Write content to file\n");
             printf("  rm <file>       - Delete file\n");
             printf("  format          - Format filesystem\n");
+            printf("  ping <ip>       - Ping an IP address\n");
             printf("  help            - Show this help\n");
             printf("  exit            - Exit shell\n");
         }

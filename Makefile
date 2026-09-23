@@ -13,6 +13,7 @@ ASFLAGS := -m32
 KERNEL_DIR := src/kernel
 DRIVER_DIR := src/drivers
 FS_DIR := src/fs
+NET_DIR := src/net
 
 # Source files
 KERNEL_SRC := $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/common.c
@@ -20,7 +21,7 @@ DRIVER_SRC := $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/ide.c
 FS_SRC := $(FS_DIR)/simplefs.c
 
 # Object files
-OBJS := boot.o interrupts.o vga.o ide.o simplefs.o
+OBJS := boot.o interrupts.o vga.o ide.o pci.o rtl8139.o ethernet.o arp.o ipv4.o icmp.o simplefs.o
 
 all: os.iso
 
@@ -38,13 +39,32 @@ vga.o: $(DRIVER_DIR)/vga.c $(DRIVER_DIR)/vga.h $(KERNEL_DIR)/common.h
 ide.o: $(DRIVER_DIR)/ide.c $(DRIVER_DIR)/ide.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
 
+pci.o: $(DRIVER_DIR)/pci.c $(DRIVER_DIR)/pci.h $(KERNEL_DIR)/common.h $(KERNEL_DIR)/kernel.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
+
+rtl8139.o: $(DRIVER_DIR)/rtl8139.c $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/pci.h $(KERNEL_DIR)/common.h $(KERNEL_DIR)/kernel.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
+
 # Filesystem
 simplefs.o: $(FS_DIR)/simplefs.c $(FS_DIR)/simplefs.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -c $< -o $@
 
+# Network stack
+ethernet.o: $(NET_DIR)/ethernet.c $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h $(NET_DIR)/byteorder.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(NET_DIR) -c $< -o $@
+
+arp.o: $(NET_DIR)/arp.c $(NET_DIR)/arp.h $(NET_DIR)/ethernet.h $(NET_DIR)/byteorder.h $(NET_DIR)/netconfig.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(NET_DIR) -c $< -o $@
+
+ipv4.o: $(NET_DIR)/ipv4.c $(NET_DIR)/ipv4.h $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/byteorder.h $(NET_DIR)/netconfig.h $(NET_DIR)/icmp.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(NET_DIR) -c $< -o $@
+
+icmp.o: $(NET_DIR)/icmp.c $(NET_DIR)/icmp.h $(NET_DIR)/ipv4.h $(NET_DIR)/ethernet.h $(NET_DIR)/byteorder.h
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(NET_DIR) -c $< -o $@
+
 # Kernel
 kernel.elf: $(OBJS) $(KERNEL_SRC) $(KERNEL_DIR)/kernel.ld
-	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) \
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR) \
 		-Wl,-T$(KERNEL_DIR)/kernel.ld -Wl,-Map=kernel.map -o $@ \
 		$(OBJS) $(KERNEL_SRC)
 
@@ -67,10 +87,12 @@ disk.img:
 
 # Run in QEMU
 run: os.iso disk.img
-	$(QEMU) -cdrom os.iso -hda disk.img -serial stdio -no-reboot -m 128M -display none
+	$(QEMU) -cdrom os.iso -hda disk.img -serial stdio -no-reboot -m 128M -display none \
+		-netdev user,id=n0 -device rtl8139,netdev=n0
 
 run-window: os.iso disk.img
-	$(QEMU) -cdrom os.iso -hda disk.img -serial stdio -no-reboot -m 128M
+	$(QEMU) -cdrom os.iso -hda disk.img -serial stdio -no-reboot -m 128M \
+		-netdev user,id=n0 -device rtl8139,netdev=n0
 
 # Clean build artifacts
 clean:

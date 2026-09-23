@@ -61,6 +61,26 @@ static inline void io_wait(void) {
     outb(0x80, 0);
 }
 
+static inline uint16_t inw(uint16_t port) {
+    uint16_t value;
+    __asm__ __volatile__("inw %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline void outw(uint16_t port, uint16_t value) {
+    __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t value;
+    __asm__ __volatile__("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
 static inline void cli(void) {
     __asm__ __volatile__("cli");
 }

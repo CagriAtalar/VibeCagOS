@@ -47,6 +47,25 @@ int strcmp(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+size_t strlen(const char *s) {
+    size_t len = 0;
+    while (*s++)
+        len++;
+    return len;
+}
+
+int memcmp(const void *s1, const void *s2, size_t n) {
+    const uint8_t *a = (const uint8_t *)s1;
+    const uint8_t *b = (const uint8_t *)s2;
+    while (n--) {
+        if (*a != *b)
+            return *a - *b;
+        a++;
+        b++;
+    }
+    return 0;
+}
+
 void putchar(char ch);
 
 void printf(const char *fmt, ...) {
