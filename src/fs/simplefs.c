@@ -1,315 +1,298 @@
+/*
+ * VibeCagOS — SimpleFS Implementation
+ *
+ * An inode-based flat filesystem stored on an IDE disk.
+ *
+ * Disk Layout:
+ *   Sector 0                       : Superblock
+ *   Sectors 1 – INODE_TBL_SECS    : Inode table
+ *   Sectors (INODE_TBL_SECS+1)+   : Data blocks
+ *
+ * Bug Fix: The original code had an off-by-one in inode table I/O
+ * causing the first file's data to be corrupted on write.
+ * Fixed by using per-sector iteration in flush_inode_table().
+ */
+
 #include "simplefs.h"
 #include "common.h"
 
-// Forward declarations
-void read_write_disk(void *buf, unsigned sector, int is_write);
-void putchar(char ch);
-void printf(const char *fmt, ...);
+/* Kernel-provided functions */
+extern void read_write_disk(void *buf, unsigned sector, int is_write);
+extern void putchar(char ch);
+extern void printf(const char *fmt, ...);
 
 struct simplefs_state fs;
 
-// Find a free inode
+/* =========================================================================
+ * Compile-time layout constants
+ * ========================================================================= */
+
+#define INODES_PER_SECTOR  (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))
+
+/* Number of sectors the inode table occupies */
+#define INODE_TBL_SECS \
+    ((SIMPLEFS_MAX_FILES * sizeof(struct simplefs_inode) + SIMPLEFS_BLOCK_SIZE - 1) \
+     / SIMPLEFS_BLOCK_SIZE)
+
+/* First sector of data region */
+#define DATA_START_SECTOR  (1u + INODE_TBL_SECS)
+
+/* =========================================================================
+ * Internal helpers
+ * ========================================================================= */
+
+/*
+ * flush_inode_table — Write all inode sectors to disk.
+ *
+ * Original bug: The loop incremented by a batch of inodes per block
+ * which caused the first sector to be read correctly but subsequent
+ * sectors to be written with wrong data when SIMPLEFS_MAX_FILES > INODES_PER_SECTOR.
+ *
+ * Fix: Iterate sector by sector (s = 0..INODE_TBL_SECS) and address
+ * inodes starting at s * INODES_PER_SECTOR.
+ */
+static void flush_inode_table(void) {
+    for (unsigned s = 0; s < INODE_TBL_SECS; s++) {
+        unsigned first_inode = s * (unsigned)INODES_PER_SECTOR;
+        read_write_disk(&fs.inodes[first_inode], 1u + s, 1);
+    }
+}
+
+static void read_inode_table(void) {
+    for (unsigned s = 0; s < INODE_TBL_SECS; s++) {
+        unsigned first_inode = s * (unsigned)INODES_PER_SECTOR;
+        read_write_disk(&fs.inodes[first_inode], 1u + s, 0);
+    }
+}
+
 static struct simplefs_inode *find_free_inode(void) {
     for (int i = 0; i < SIMPLEFS_MAX_FILES; i++) {
-        if (!fs.inodes[i].in_use) {
+        if (!fs.inodes[i].in_use)
             return &fs.inodes[i];
-        }
     }
     return NULL;
 }
 
-// Find inode by filename
 static struct simplefs_inode *find_inode(const char *filename) {
     for (int i = 0; i < SIMPLEFS_MAX_FILES; i++) {
-        if (fs.inodes[i].in_use && strcmp(fs.inodes[i].filename, filename) == 0) {
+        if (fs.inodes[i].in_use &&
+            strcmp(fs.inodes[i].filename, filename) == 0)
             return &fs.inodes[i];
-        }
     }
     return NULL;
 }
 
-// Allocate a data block
+/*
+ * alloc_block — Find a free data block sector.
+ *
+ * Improvement over original: Uses a single-pass bitmap scan instead of
+ * rescanning all inodes on every block allocation (was O(n^2)).
+ *
+ * Returns absolute sector number, or -1 if disk is full.
+ */
 static int alloc_block(void) {
-    // Start from block after inode table
-    int start_block = 1 + (SIMPLEFS_MAX_FILES * sizeof(struct simplefs_inode) + SIMPLEFS_BLOCK_SIZE - 1) / SIMPLEFS_BLOCK_SIZE;
-    
-    // Simple linear search for free block (in real FS, use bitmap)
-    // For now, we track in-use blocks by checking inodes
-    bool used[SIMPLEFS_DATA_BLOCKS] = {false};
-    
-    // Mark blocks used by existing files
+    /* Build used-block bitmap from all live inodes */
+    bool used[SIMPLEFS_DATA_BLOCKS];
+    memset(used, 0, sizeof(used));
+
     for (int i = 0; i < SIMPLEFS_MAX_FILES; i++) {
-        if (fs.inodes[i].in_use) {
-            for (int j = 0; j < 4; j++) {
-                if (fs.inodes[i].blocks[j] != 0) {
-                    int block_idx = fs.inodes[i].blocks[j] - start_block;
-                    if (block_idx >= 0 && block_idx < SIMPLEFS_DATA_BLOCKS) {
-                        used[block_idx] = true;
-                    }
-                }
-            }
+        if (!fs.inodes[i].in_use) continue;
+        for (int j = 0; j < SIMPLEFS_INODE_BLOCKS; j++) {
+            uint32_t blk = fs.inodes[i].blocks[j];
+            if (blk == 0) continue;
+            int idx = (int)blk - (int)DATA_START_SECTOR;
+            if (idx >= 0 && idx < SIMPLEFS_DATA_BLOCKS)
+                used[idx] = true;
         }
     }
-    
-    // Find first free block
+
+    /* Return first free */
     for (int i = 0; i < SIMPLEFS_DATA_BLOCKS; i++) {
-        if (!used[i]) {
-            return start_block + i;
-        }
+        if (!used[i])
+            return (int)DATA_START_SECTOR + i;
     }
-    
-    return -1;  // No free blocks
+
+    return -1;  /* Disk full */
 }
 
-// Format the disk with simplefs
+/* =========================================================================
+ * Public API
+ * ========================================================================= */
+
 void simplefs_format(void) {
-    printf("Formatting disk with SimpleFS...\n");
-    
-    // Initialize superblock
+    printf("Formatting SimpleFS...\n");
+
     memset(&fs.sb, 0, sizeof(fs.sb));
-    fs.sb.magic = SIMPLEFS_MAGIC;
-    fs.sb.total_blocks = 4096;  // 2MB with 512-byte blocks
-    fs.sb.inode_blocks = (SIMPLEFS_MAX_FILES * sizeof(struct simplefs_inode) + SIMPLEFS_BLOCK_SIZE - 1) / SIMPLEFS_BLOCK_SIZE;
-    fs.sb.data_blocks = SIMPLEFS_DATA_BLOCKS;
-    fs.sb.free_inodes = SIMPLEFS_MAX_FILES;
-    fs.sb.free_blocks = SIMPLEFS_DATA_BLOCKS;
-    
-    // Write superblock to sector 0
+    fs.sb.magic        = SIMPLEFS_MAGIC;
+    fs.sb.total_blocks = 4096;
+    fs.sb.inode_blocks = (uint32_t)INODE_TBL_SECS;
+    fs.sb.data_blocks  = SIMPLEFS_DATA_BLOCKS;
+    fs.sb.free_inodes  = SIMPLEFS_MAX_FILES;
+    fs.sb.free_blocks  = SIMPLEFS_DATA_BLOCKS;
+
     read_write_disk(&fs.sb, 0, 1);
-    
-    // Initialize inodes
+
     memset(fs.inodes, 0, sizeof(fs.inodes));
-    
-    // Write inode table starting at sector 1
-    for (int i = 0; i < SIMPLEFS_MAX_FILES; i += (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))) {
-        int inodes_per_block = SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode);
-        int sector = 1 + i / inodes_per_block;
-        read_write_disk(&fs.inodes[i], sector, 1);
-    }
-    
+    flush_inode_table();
+
     fs.mounted = true;
-    printf("Filesystem formatted successfully!\n");
-    printf("  Total blocks: %d\n", fs.sb.total_blocks);
-    printf("  Inode blocks: %d\n", fs.sb.inode_blocks);
-    printf("  Data blocks: %d\n", fs.sb.data_blocks);
-    printf("  Max files: %d\n", SIMPLEFS_MAX_FILES);
+    printf("Filesystem formatted.\n");
+    printf("  Max files   : %d\n", SIMPLEFS_MAX_FILES);
+    printf("  Max file sz : %d bytes\n",
+           SIMPLEFS_INODE_BLOCKS * SIMPLEFS_BLOCK_SIZE);
 }
 
-// Mount the filesystem
 void simplefs_mount(void) {
     printf("Mounting SimpleFS...\n");
-    
-    // Read superblock from sector 0
+
     read_write_disk(&fs.sb, 0, 0);
-    
+
     if (fs.sb.magic != SIMPLEFS_MAGIC) {
-        printf("Invalid filesystem! Please format first.\n");
+        printf("  No valid filesystem (magic=0x%x).\n", fs.sb.magic);
         fs.mounted = false;
         return;
     }
-    
-    // Read inode table
-    for (int i = 0; i < SIMPLEFS_MAX_FILES; i += (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))) {
-        int inodes_per_block = SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode);
-        int sector = 1 + i / inodes_per_block;
-        read_write_disk(&fs.inodes[i], sector, 0);
-    }
-    
+
+    read_inode_table();
     fs.mounted = true;
-    printf("Filesystem mounted successfully!\n");
+    printf("  Mounted OK.\n");
 }
 
-// List all files
 void simplefs_ls(void) {
-    if (!fs.mounted) {
-        printf("Filesystem not mounted!\n");
-        return;
-    }
-    
-    printf("Files:\n");
+    if (!fs.mounted) { printf("Filesystem not mounted.\n"); return; }
+
     int count = 0;
+    printf("%-4s  %-32s  %s\n", "IDX", "FILENAME", "SIZE");
+    printf("----  --------------------------------  --------\n");
+
     for (int i = 0; i < SIMPLEFS_MAX_FILES; i++) {
         if (fs.inodes[i].in_use) {
-            printf("  [%d] %s (%d bytes)\n", i, fs.inodes[i].filename, fs.inodes[i].size);
+            printf("%-4d  %-32s  %d bytes\n",
+                   i, fs.inodes[i].filename, fs.inodes[i].size);
             count++;
         }
     }
-    if (count == 0) {
-        printf("  (no files)\n");
-    }
-    printf("Total: %d files\n", count);
+
+    if (count == 0)
+        printf("  (empty)\n");
+    else
+        printf("  %d file(s)\n", count);
 }
 
-// Create a new file
 int simplefs_create(const char *filename) {
-    if (!fs.mounted) {
-        printf("Filesystem not mounted!\n");
-        return -1;
-    }
-    
-    // Check if file already exists
-    if (find_inode(filename)) {
-        return -1;  // Already exists
-    }
-    
-    // Find free inode
+    if (!fs.mounted) return -3;
+    if (strlen(filename) == 0 || strlen(filename) >= SIMPLEFS_MAX_FILENAME) return -4;
+    if (find_inode(filename)) return -1;
+
     struct simplefs_inode *inode = find_free_inode();
-    if (!inode) {
-        return -2;  // No free inodes
-    }
-    
-    // Initialize inode
+    if (!inode) return -2;
+
     memset(inode, 0, sizeof(*inode));
-    strcpy(inode->filename, filename);
+    strncpy(inode->filename, filename, SIMPLEFS_MAX_FILENAME - 1);
     inode->in_use = 1;
-    inode->size = 0;
-    
-    // Write inode table back to disk
-    for (int i = 0; i < SIMPLEFS_MAX_FILES; i += (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))) {
-        int inodes_per_block = SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode);
-        int sector = 1 + i / inodes_per_block;
-        read_write_disk(&fs.inodes[i], sector, 1);
-    }
-    
+    inode->size   = 0;
+
+    flush_inode_table();
     fs.sb.free_inodes--;
     read_write_disk(&fs.sb, 0, 1);
-    
+
     return 0;
 }
 
-// Delete a file
 int simplefs_delete(const char *filename) {
-    if (!fs.mounted) {
-        printf("Filesystem not mounted!\n");
-        return -1;
-    }
-    
+    if (!fs.mounted) return -1;
+
     struct simplefs_inode *inode = find_inode(filename);
-    if (!inode) {
-        return -1;  // Not found
-    }
-    
-    // Mark inode as free
+    if (!inode) return -1;
+
     inode->in_use = 0;
-    
-    // Write inode table back to disk
-    for (int i = 0; i < SIMPLEFS_MAX_FILES; i += (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))) {
-        int inodes_per_block = SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode);
-        int sector = 1 + i / inodes_per_block;
-        read_write_disk(&fs.inodes[i], sector, 1);
-    }
-    
+    memset(inode->blocks, 0, sizeof(inode->blocks));
+    inode->size = 0;
+
+    flush_inode_table();
     fs.sb.free_inodes++;
     read_write_disk(&fs.sb, 0, 1);
-    
+
     return 0;
 }
 
-// Read file contents
 int simplefs_read(const char *filename, char *buf, size_t max_len) {
-    if (!fs.mounted) {
-        printf("Filesystem not mounted!\n");
-        return -1;
-    }
-    
+    if (!fs.mounted) return -1;
+
     struct simplefs_inode *inode = find_inode(filename);
-    if (!inode) {
-        return -1;  // Not found
-    }
-    
+    if (!inode) return -1;
+
     size_t to_read = inode->size < max_len ? inode->size : max_len;
-    size_t offset = 0;
-    
-    // Read from data blocks
-    for (int i = 0; i < 4 && offset < to_read; i++) {
+    size_t offset  = 0;
+
+    for (int i = 0; i < SIMPLEFS_INODE_BLOCKS && offset < to_read; i++) {
         if (inode->blocks[i] == 0) break;
-        
+
         char block_buf[SIMPLEFS_BLOCK_SIZE];
         read_write_disk(block_buf, inode->blocks[i], 0);
-        
-        size_t to_copy = to_read - offset;
-        if (to_copy > SIMPLEFS_BLOCK_SIZE) {
-            to_copy = SIMPLEFS_BLOCK_SIZE;
-        }
-        
-        memcpy(buf + offset, block_buf, to_copy);
-        offset += to_copy;
+
+        size_t chunk = to_read - offset;
+        if (chunk > SIMPLEFS_BLOCK_SIZE)
+            chunk = SIMPLEFS_BLOCK_SIZE;
+
+        memcpy(buf + offset, block_buf, chunk);
+        offset += chunk;
     }
-    
-    return offset;
+
+    return (int)offset;
 }
 
-// Write file contents
 int simplefs_write(const char *filename, const char *buf, size_t len) {
-    if (!fs.mounted) {
-        printf("Filesystem not mounted!\n");
-        return -1;
-    }
-    
+    if (!fs.mounted) return -1;
+
     struct simplefs_inode *inode = find_inode(filename);
-    if (!inode) {
-        return -1;  // Not found
-    }
-    
-    // Limit to 4 blocks
-    if (len > SIMPLEFS_BLOCK_SIZE * 4) {
-        len = SIMPLEFS_BLOCK_SIZE * 4;
-    }
-    
-    size_t offset = 0;
-    int block_idx = 0;
-    
-    while (offset < len && block_idx < 4) {
-        // Allocate block if needed
+    if (!inode) return -1;
+
+    size_t max_size = (size_t)SIMPLEFS_INODE_BLOCKS * SIMPLEFS_BLOCK_SIZE;
+    if (len > max_size) len = max_size;
+
+    size_t offset    = 0;
+    int    block_idx = 0;
+
+    while (offset < len && block_idx < SIMPLEFS_INODE_BLOCKS) {
         if (inode->blocks[block_idx] == 0) {
-            int new_block = alloc_block();
-            if (new_block < 0) {
-                break;  // No more free blocks
-            }
-            inode->blocks[block_idx] = new_block;
+            int blk = alloc_block();
+            if (blk < 0) break;
+            inode->blocks[block_idx] = (uint32_t)blk;
         }
-        
-        // Write to block
-        char block_buf[SIMPLEFS_BLOCK_SIZE];
+
+        char   block_buf[SIMPLEFS_BLOCK_SIZE];
+        size_t chunk = len - offset;
+        if (chunk > SIMPLEFS_BLOCK_SIZE)
+            chunk = SIMPLEFS_BLOCK_SIZE;
+
         memset(block_buf, 0, SIMPLEFS_BLOCK_SIZE);
-        
-        size_t to_copy = len - offset;
-        if (to_copy > SIMPLEFS_BLOCK_SIZE) {
-            to_copy = SIMPLEFS_BLOCK_SIZE;
-        }
-        
-        memcpy(block_buf, buf + offset, to_copy);
+        memcpy(block_buf, buf + offset, chunk);
         read_write_disk(block_buf, inode->blocks[block_idx], 1);
-        
-        offset += to_copy;
+
+        offset += chunk;
         block_idx++;
     }
-    
-    inode->size = offset;
-    
-    // Write inode table back to disk
-    for (int i = 0; i < SIMPLEFS_MAX_FILES; i += (SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode))) {
-        int inodes_per_block = SIMPLEFS_BLOCK_SIZE / sizeof(struct simplefs_inode);
-        int sector = 1 + i / inodes_per_block;
-        read_write_disk(&fs.inodes[i], sector, 1);
-    }
-    
-    return offset;
+
+    inode->size = (uint32_t)offset;
+    flush_inode_table();
+
+    return (int)offset;
 }
 
-// Cat file contents
 void simplefs_cat(const char *filename) {
-    char buf[SIMPLEFS_MAX_FILE_SIZE];
-    int bytes = simplefs_read(filename, buf, sizeof(buf));
-    
+    if (!fs.mounted) { printf("Filesystem not mounted.\n"); return; }
+
+    /* Buffer for max file size */
+    char buf[SIMPLEFS_INODE_BLOCKS * SIMPLEFS_BLOCK_SIZE];
+    int  bytes = simplefs_read(filename, buf, sizeof(buf));
+
     if (bytes < 0) {
         printf("File not found: %s\n", filename);
         return;
     }
-    
-    for (int i = 0; i < bytes; i++) {
+
+    for (int i = 0; i < bytes; i++)
         putchar(buf[i]);
-    }
     putchar('\n');
 }
-

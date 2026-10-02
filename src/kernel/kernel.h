@@ -1,52 +1,164 @@
 #pragma once
 #include "common.h"
 
-#define PROCS_MAX 8
+/*
+ * VibeCagOS — Kernel Definitions
+ *
+ * Contains: x86 hardware interface, GDT, IDT, TSS, process model,
+ *           memory management constants, I/O port helpers.
+ */
+
+/* =========================================================================
+ * Constants
+ * ========================================================================= */
+
+#define PROCS_MAX    16        /* Maximum number of concurrent processes */
+#define KERNEL_STACK 8192      /* Per-process kernel stack size          */
+
+/* Process states */
 #define PROC_UNUSED   0
 #define PROC_RUNNABLE 1
-#define PROC_EXITED   2
+#define PROC_RUNNING  2
+#define PROC_SLEEPING 3
+#define PROC_ZOMBIE   4
+#define PROC_BLOCKED  5
 
-// x86 paging flags
-#define PAGE_PRESENT  (1 << 0)
-#define PAGE_WRITE    (1 << 1)
-#define PAGE_USER     (1 << 2)
+/* x86 Page table flags */
+#define PAGE_PRESENT (1 << 0)
+#define PAGE_WRITE   (1 << 1)
+#define PAGE_USER    (1 << 2)
 
-#define USER_BASE 0x1000000
+/* User space virtual base address */
+#define USER_BASE    0x01000000u   /* 16 MiB */
+#define USER_STACK   0x0FFFF000u   /* User stack top */
 
-struct process {
-    int pid;
-    int state;
-    vaddr_t sp;
-    uint32_t *page_table;
-    uint8_t stack[8192];
-};
+/* =========================================================================
+ * GDT Segment Selectors
+ * ========================================================================= */
+
+#define GDT_NULL        0x00   /* Null descriptor */
+#define GDT_KERNEL_CODE 0x08   /* Ring 0 code */
+#define GDT_KERNEL_DATA 0x10   /* Ring 0 data */
+#define GDT_USER_CODE   0x18   /* Ring 3 code */
+#define GDT_USER_DATA   0x20   /* Ring 3 data */
+#define GDT_TSS         0x28   /* Task State Segment */
+
+/* Selector RPL bits */
+#define RPL_KERNEL 0
+#define RPL_USER   3
+
+/* Full selectors with RPL */
+#define SEL_KERNEL_CODE  (GDT_KERNEL_CODE | RPL_KERNEL)
+#define SEL_KERNEL_DATA  (GDT_KERNEL_DATA | RPL_KERNEL)
+#define SEL_USER_CODE    (GDT_USER_CODE   | RPL_USER)
+#define SEL_USER_DATA    (GDT_USER_DATA   | RPL_USER)
+#define SEL_TSS          (GDT_TSS         | RPL_KERNEL)
+
+/* =========================================================================
+ * GDT / IDT Structures
+ * ========================================================================= */
+
+struct gdt_entry {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t  base_mid;
+    uint8_t  access;
+    uint8_t  granularity;
+    uint8_t  base_high;
+} __attribute__((packed));
+
+struct gdt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+struct idt_entry {
+    uint16_t offset_low;
+    uint16_t selector;
+    uint8_t  zero;
+    uint8_t  type_attr;
+    uint16_t offset_high;
+} __attribute__((packed));
+
+struct idt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+/* =========================================================================
+ * Task State Segment (TSS)
+ * ========================================================================= */
+
+struct tss {
+    uint32_t link;
+    uint32_t esp0;   /* Kernel stack pointer for ring 0 */
+    uint32_t ss0;    /* Kernel stack segment = GDT_KERNEL_DATA */
+    uint32_t esp1;
+    uint32_t ss1;
+    uint32_t esp2;
+    uint32_t ss2;
+    uint32_t cr3;
+    uint32_t eip;
+    uint32_t eflags;
+    uint32_t eax, ecx, edx, ebx;
+    uint32_t esp, ebp, esi, edi;
+    uint32_t es, cs, ss, ds, fs, gs;
+    uint32_t ldt;
+    uint16_t trap;
+    uint16_t iomap_base;
+} __attribute__((packed));
+
+/* =========================================================================
+ * Interrupt / Trap Frame
+ * ========================================================================= */
 
 struct trap_frame {
-    uint32_t edi;
-    uint32_t esi;
-    uint32_t ebp;
-    uint32_t esp;
-    uint32_t ebx;
-    uint32_t edx;
-    uint32_t ecx;
-    uint32_t eax;
+    /* Saved by our ISR stub (reverse push order) */
+    uint32_t edi, esi, ebp;
+    uint32_t esp_dummy;  /* Pushed by pusha — unusable */
+    uint32_t ebx, edx, ecx, eax;
+    /* Pushed by ISR stub */
     uint32_t int_no;
     uint32_t err_code;
+    /* Pushed by CPU */
     uint32_t eip;
     uint32_t cs;
     uint32_t eflags;
+    /* Only present if privilege level change (ring3 -> ring0) */
     uint32_t user_esp;
     uint32_t user_ss;
 } __attribute__((packed));
 
+/* =========================================================================
+ * Process Structure
+ * ========================================================================= */
 
-#define PANIC(fmt, ...)                                                        \
-    do {                                                                       \
-        printf("PANIC: %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);  \
-        while (1) { __asm__ __volatile__("hlt"); }                             \
+struct process {
+    int      pid;
+    int      state;
+    uint32_t sp;                   /* Kernel stack pointer (when not running) */
+    uint32_t *page_table;          /* CR3 value — page directory */
+    uint32_t sleep_until;          /* Wake tick for PROC_SLEEPING */
+    int      exit_code;
+    char     name[32];
+    uint8_t  stack[KERNEL_STACK];  /* Per-process kernel stack */
+};
+
+/* =========================================================================
+ * PANIC macro
+ * ========================================================================= */
+
+void kernel_panic(const char *file, int line, const char *fmt, ...);
+
+#define PANIC(fmt, ...)                                          \
+    do {                                                         \
+        kernel_panic(__FILE__, __LINE__, fmt, ##__VA_ARGS__);   \
     } while (0)
 
-// x86 specific functions
+/* =========================================================================
+ * x86 Port I/O (inline)
+ * ========================================================================= */
+
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
 }
@@ -89,8 +201,20 @@ static inline void sti(void) {
     __asm__ __volatile__("sti");
 }
 
+static inline void halt(void) {
+    __asm__ __volatile__("hlt");
+}
+
 static inline void load_idt(void *idt_ptr) {
     __asm__ __volatile__("lidt (%0)" : : "r"(idt_ptr));
+}
+
+static inline void load_gdt(void *gdt_ptr) {
+    __asm__ __volatile__("lgdt (%0)" : : "r"(gdt_ptr));
+}
+
+static inline void load_tr(uint16_t sel) {
+    __asm__ __volatile__("ltr %0" : : "r"(sel));
 }
 
 static inline void load_cr3(uint32_t pd) {
@@ -98,15 +222,69 @@ static inline void load_cr3(uint32_t pd) {
 }
 
 static inline uint32_t read_cr3(void) {
-    uint32_t value;
-    __asm__ __volatile__("mov %%cr3, %0" : "=r"(value));
-    return value;
+    uint32_t v;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(v));
+    return v;
+}
+
+static inline uint32_t read_cr2(void) {
+    uint32_t v;
+    __asm__ __volatile__("mov %%cr2, %0" : "=r"(v));
+    return v;
 }
 
 static inline void enable_paging(void) {
     uint32_t cr0;
     __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= 0x80000000;
+    cr0 |= 0x80000000u;
     __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0));
 }
 
+/* =========================================================================
+ * Kernel API declarations
+ * ========================================================================= */
+
+/* Memory */
+paddr_t   alloc_pages(uint32_t n);
+void      map_page(uint32_t *page_dir, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+
+/* GDT / IDT */
+void      gdt_init(void);
+void      idt_init(void);
+void      pic_init(void);
+void      idt_set_gate(uint8_t num, uint32_t handler, uint16_t sel, uint8_t flags);
+
+/* Serial */
+void      serial_init(void);
+long      serial_getchar(void);
+
+/* Scheduler */
+void      yield(void);
+void      schedule(void);
+void      sleep_ms(uint32_t ms);
+
+/* Process */
+struct process *create_process(const void *image, size_t image_size, const char *name);
+void      process_exit(int code);
+
+/* Interrupt handlers (asm stubs) */
+extern void isr0(void);   /* Divide by zero */
+extern void isr14(void);  /* Page fault */
+extern void isr32(void);  /* Timer IRQ0 */
+extern void isr33(void);  /* Keyboard IRQ1 */
+extern void isr128(void); /* Syscall int 0x80 */
+
+/* Handle interrupt (C) */
+void      handle_interrupt(struct trap_frame *f);
+
+/* Timer */
+void      pit_init(uint32_t hz);
+uint32_t  get_ticks(void);
+uint32_t  get_uptime_ms(void);
+
+/* Keyboard */
+void      keyboard_init(void);
+int       keyboard_getchar(void);  /* Returns -1 if no char */
+
+/* TSS */
+void      tss_set_kernel_stack(uint32_t esp0);

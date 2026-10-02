@@ -1,44 +1,82 @@
 #pragma once
 
-typedef int bool;
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef uint32_t size_t;
-typedef uint32_t paddr_t;
-typedef uint32_t vaddr_t;
+/*
+ * VibeCagOS — Common Types and Macros
+ * Freestanding kernel environment definitions.
+ */
 
-#define true  1
-#define false 0
-#define NULL  ((void *) 0)
+/* Standard integer types */
+typedef int            bool;
+typedef unsigned char  uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int   uint32_t;
+typedef unsigned long long uint64_t;
+typedef signed int     int32_t;
+typedef signed short   int16_t;
+typedef signed char    int8_t;
+typedef uint32_t       size_t;
+typedef uint32_t       paddr_t;
+typedef uint32_t       vaddr_t;
+
+#define true   1
+#define false  0
+#define NULL   ((void *)0)
+
+/* Page constants */
+#define PAGE_SIZE  4096
+#define PAGE_SHIFT 12
+
+/* Alignment helpers (using clang/gcc builtins) */
 #define align_up(value, align)   __builtin_align_up(value, align)
+#define align_down(value, align) ((value) & ~((align) - 1))
 #define is_aligned(value, align) __builtin_is_aligned(value, align)
 #define offsetof(type, member)   __builtin_offsetof(type, member)
+
+/* va_list */
 #define va_list  __builtin_va_list
 #define va_start __builtin_va_start
 #define va_end   __builtin_va_end
 #define va_arg   __builtin_va_arg
-#define PAGE_SIZE 4096
 
-// System call numbers
-#define SYS_PUTCHAR 1
-#define SYS_GETCHAR 2
-#define SYS_EXIT    3
+/* Array size */
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+/* Min/Max */
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+/*
+ * Syscall numbers
+ */
+#define SYS_PUTCHAR   1
+#define SYS_GETCHAR   2
+#define SYS_EXIT      3
 #define SYS_READFILE  4
 #define SYS_WRITEFILE 5
-#define SYS_ADDFILE 6
-#define SYS_READF 7
-#define SYS_ADDF 8
-#define SYS_WRITEF 9
-#define SYS_LS 10
+#define SYS_LS        6
+#define SYS_MKDIR     7
+#define SYS_UNLINK    8
+#define SYS_GETPID    9
+#define SYS_SLEEP     10
+#define SYS_YIELD     11
+#define SYS_UPTIME    12
 
-void *memset(void *buf, char c, size_t n);
-void *memcpy(void *dst, const void *src, size_t n);
-char *strcpy(char *dst, const char *src);
-int strcmp(const char *s1, const char *s2);
-int strncmp(const char *s1, const char *s2, int n);
+/*
+ * Standard library functions (implemented in common.c)
+ */
+void  *memset(void *buf, int c, size_t n);
+void  *memcpy(void *dst, const void *src, size_t n);
+int    memcmp(const void *s1, const void *s2, size_t n);
+char  *strcpy(char *dst, const char *src);
+char  *strncpy(char *dst, const char *src, size_t n);
+int    strcmp(const char *s1, const char *s2);
+int    strncmp(const char *s1, const char *s2, int n);
 size_t strlen(const char *s);
-int memcmp(const void *s1, const void *s2, size_t n);
+char  *strcat(char *dst, const char *src);
+char  *strchr(const char *s, int c);
+
+/* Formatted output (kernel printf — outputs via putchar()) */
 void printf(const char *fmt, ...);
 
+/* putchar is declared in kernel.h as it needs hardware access */
+void putchar(char ch);
