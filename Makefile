@@ -1,8 +1,8 @@
-.PHONY: all clean run run-window run-gdb debug image disk help
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test
 
 # ============================================================
 # VibeCagOS Build System
-# Version 0.2.0
+# Version 0.3.0
 # ============================================================
 
 QEMU    := qemu-system-i386
@@ -28,19 +28,24 @@ FS_DIR     := src/fs
 NET_DIR    := src/net
 
 # Common include path
-INCLUDES := -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
+INCLUDES := -Isrc -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
 OBJS := boot.o interrupts.o \
-        vga.o ide.o pci.o rtl8139.o \
+        vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         simplefs.o \
-        ethernet.o arp.o ipv4.o icmp.o \
+        vibefs.o vfs.o procfs.o devfs.o \
+        kmalloc.o klog.o pmm.o vmm.o \
+        ethernet.o arp.o ipv4.o icmp.o udp.o dns.o \
         kernel.o common.o
 
 # QEMU options
-QEMU_COMMON := -cdrom os.iso -hda disk.img \
+QEMU_COMMON := -cdrom os.iso -drive file=disk.img,format=raw,if=ide \
                -no-reboot -m 128M \
-               -netdev user,id=n0 -device rtl8139,netdev=n0
+               -netdev user,id=n0 -device rtl8139,netdev=n0 \
+               -serial stdio
+
+QEMU_SMP := $(QEMU_COMMON) -smp 2
 
 # ============================================================
 # Targets
@@ -57,10 +62,12 @@ interrupts.o: $(KERNEL_DIR)/interrupts.s
 
 # Kernel C files
 kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
+           $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/multiboot.h \
            $(FS_DIR)/simplefs.h $(DRIVER_DIR)/vga.h $(DRIVER_DIR)/ide.h \
-           $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h \
+           $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
+           $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
-           $(NET_DIR)/icmp.h $(NET_DIR)/netconfig.h
+           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 common.o: $(KERNEL_DIR)/common.c $(KERNEL_DIR)/common.h
@@ -80,8 +87,42 @@ rtl8139.o: $(DRIVER_DIR)/rtl8139.c $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/pci.h \
             $(KERNEL_DIR)/common.h $(KERNEL_DIR)/kernel.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+rtc.o: $(DRIVER_DIR)/rtc.c $(DRIVER_DIR)/rtc.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+mouse.o: $(DRIVER_DIR)/mouse.c $(DRIVER_DIR)/mouse.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+gui.o: $(DRIVER_DIR)/gui.c $(DRIVER_DIR)/gui.h $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/rtc.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # Filesystem
 simplefs.o: $(FS_DIR)/simplefs.c $(FS_DIR)/simplefs.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+vfs.o: $(FS_DIR)/vfs.c $(FS_DIR)/vfs.h $(KERNEL_DIR)/kmalloc.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+vibefs.o: $(FS_DIR)/vibefs.c $(FS_DIR)/vibefs.h $(FS_DIR)/vfs.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+procfs.o: $(FS_DIR)/procfs.c $(FS_DIR)/procfs.h $(FS_DIR)/vfs.h $(KERNEL_DIR)/common.h $(KERNEL_DIR)/klog.h $(KERNEL_DIR)/pmm.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+devfs.o: $(FS_DIR)/devfs.c $(FS_DIR)/devfs.h $(FS_DIR)/vfs.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# Memory
+kmalloc.o: $(KERNEL_DIR)/kmalloc.c $(KERNEL_DIR)/kmalloc.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+klog.o: $(KERNEL_DIR)/klog.c $(KERNEL_DIR)/klog.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+pmm.o: $(KERNEL_DIR)/pmm.c $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+vmm.o: $(KERNEL_DIR)/vmm.c $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Network stack
@@ -95,11 +136,17 @@ arp.o: $(NET_DIR)/arp.c $(NET_DIR)/arp.h $(NET_DIR)/ethernet.h \
 
 ipv4.o: $(NET_DIR)/ipv4.c $(NET_DIR)/ipv4.h $(NET_DIR)/ethernet.h \
         $(NET_DIR)/arp.h $(NET_DIR)/byteorder.h $(NET_DIR)/netconfig.h \
-        $(NET_DIR)/icmp.h
+        $(NET_DIR)/icmp.h $(NET_DIR)/udp.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 icmp.o: $(NET_DIR)/icmp.c $(NET_DIR)/icmp.h $(NET_DIR)/ipv4.h \
         $(NET_DIR)/ethernet.h $(NET_DIR)/byteorder.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+udp.o: $(NET_DIR)/udp.c $(NET_DIR)/udp.h $(NET_DIR)/ipv4.h $(KERNEL_DIR)/common.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+dns.o: $(NET_DIR)/dns.c $(NET_DIR)/dns.h $(NET_DIR)/udp.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Link kernel ELF
@@ -125,17 +172,24 @@ disk.img:
 # ============================================================
 
 run: os.iso disk.img
-	$(QEMU) $(QEMU_COMMON) -serial stdio -display none
+	$(QEMU) $(QEMU_COMMON) -display none
 
 run-window: os.iso disk.img
-	$(QEMU) $(QEMU_COMMON) -serial stdio
+	$(QEMU) $(QEMU_COMMON)
+
+run-smp: os.iso disk.img
+	$(QEMU) $(QEMU_SMP) -display none
+
+test: os.iso disk.img
+	@echo "Running QEMU integration test (serial output)..."
+	@printf '\nhelp\npwd\ndate\nfree\ndevices\npci\nls\necho VibeCagOS_Automated_Test_OK > /tmp/test.txt\ncat /tmp/test.txt\ncp /tmp/test.txt /tmp/copy.txt\nhead /tmp/copy.txt\nstat /tmp/copy.txt\ncat /proc/version\ncat /proc/meminfo\ncat /etc/version\ndmesg\nexit\n' | timeout 12 $(QEMU) $(QEMU_COMMON) -display none 2>&1
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img
 	@echo "Starting QEMU with GDB stub on port 1234..."
 	@echo "In another terminal run:"
 	@echo "  gdb kernel.elf -ex 'target remote :1234' -ex 'break kernel_main' -ex 'continue'"
-	$(QEMU) $(QEMU_COMMON) -serial stdio -display none -s -S
+	$(QEMU) $(QEMU_COMMON) -display none -s -S
 
 # Disassemble kernel
 disassemble: kernel.elf

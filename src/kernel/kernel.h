@@ -246,12 +246,14 @@ static inline void enable_paging(void) {
 
 /* Memory */
 paddr_t   alloc_pages(uint32_t n);
+void      free_pages(paddr_t paddr, uint32_t n);
 void      map_page(uint32_t *page_dir, uint32_t vaddr, paddr_t paddr, uint32_t flags);
 
 /* GDT / IDT */
 void      gdt_init(void);
 void      idt_init(void);
 void      pic_init(void);
+void      pic_unmask_irq(uint8_t irq);
 void      idt_set_gate(uint8_t num, uint32_t handler, uint16_t sel, uint8_t flags);
 
 /* Serial */
@@ -269,9 +271,19 @@ void      process_exit(int code);
 
 /* Interrupt handlers (asm stubs) */
 extern void isr0(void);   /* Divide by zero */
+extern void isr1(void);   /* Debug */
+extern void isr2(void);   /* NMI */
+extern void isr3(void);   /* Breakpoint */
+extern void isr6(void);   /* Invalid opcode */
+extern void isr8(void);   /* Double fault */
+extern void isr13(void);  /* GP fault */
 extern void isr14(void);  /* Page fault */
 extern void isr32(void);  /* Timer IRQ0 */
 extern void isr33(void);  /* Keyboard IRQ1 */
+extern void isr34(void);  /* Cascade IRQ2 */
+extern void isr43(void);  /* NIC IRQ11 */
+extern void isr44(void);  /* Mouse IRQ12 */
+extern void isr46(void);  /* IDE IRQ14 */
 extern void isr128(void); /* Syscall int 0x80 */
 
 /* Handle interrupt (C) */

@@ -219,6 +219,12 @@ void printf(const char *fmt, ...) {
                 pad_print(buf, len, width, left_align, pad);
                 break;
             }
+            case 'o': {
+                char buf[16];
+                int  len = uint_to_str(va_arg(vargs, unsigned), 8, buf, sizeof(buf));
+                pad_print(buf, len, width, left_align, pad);
+                break;
+            }
             case 'x': {
                 char buf[16];
                 int  len = uint_to_str(va_arg(vargs, unsigned), 16, buf, sizeof(buf));

@@ -17,6 +17,8 @@ typedef signed char    int8_t;
 typedef uint32_t       size_t;
 typedef uint32_t       paddr_t;
 typedef uint32_t       vaddr_t;
+typedef uint32_t       uintptr_t;
+typedef int32_t        intptr_t;
 
 #define true   1
 #define false  0
@@ -60,6 +62,8 @@ typedef uint32_t       vaddr_t;
 #define SYS_SLEEP     10
 #define SYS_YIELD     11
 #define SYS_UPTIME    12
+#define SYS_STAT      13
+#define SYS_TIME      14
 
 /*
  * Standard library functions (implemented in common.c)

@@ -23,8 +23,11 @@ _start:
     pushl $0
     popf
     
-    # Jump to kernel (GRUB already set up basic environment)
+    # Pass Multiboot arguments to kernel_main(magic, mb_info)
+    pushl %ebx
+    pushl %eax
     call kernel_main
+    addl $8, %esp
     
     # Halt if we return
 .hang:

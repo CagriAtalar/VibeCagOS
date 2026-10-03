@@ -126,6 +126,20 @@ isr34:
     pushl $34
     jmp isr_common
 
+/* IRQ11 → int 0x2B: PCI NIC (RTL8139) */
+.global isr43
+isr43:
+    pushl $0
+    pushl $43
+    jmp isr_common
+
+/* IRQ12 → int 0x2C: PS/2 Mouse */
+.global isr44
+isr44:
+    pushl $0
+    pushl $44
+    jmp isr_common
+
 /* IRQ14 → int 0x2E: IDE Primary */
 .global isr46
 isr46:

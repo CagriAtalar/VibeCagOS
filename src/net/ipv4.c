@@ -4,6 +4,7 @@
 #include "byteorder.h"
 #include "netconfig.h"
 #include "icmp.h"
+#include "udp.h"
 
 /* Forward declaration */
 void printf(const char *fmt, ...);
@@ -126,8 +127,11 @@ void ipv4_handle_packet(const void *data, uint16_t len) {
         case IP_PROTO_ICMP:
             icmp_handle_packet(src_ip, payload, payload_len);
             break;
+        case IP_PROTO_UDP:
+            udp_handle_packet(src_ip, payload, payload_len);
+            break;
         default:
-            /* TCP/UDP not implemented — drop */
+            /* TCP not yet implemented — drop */
             break;
     }
 }
