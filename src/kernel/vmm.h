@@ -47,6 +47,14 @@ void     dma_free(void *ptr, size_t size);
 /* Switch active page directory (CR3) */
 void     vmm_switch_dir(uint32_t *pd);
 
+/* True if vaddr is mapped user-accessible (PDE and PTE both have U/S set),
+ * and writable when write is true. Used to validate syscall pointers. */
+bool     vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write);
+
+/* Release the user half of an address space plus the page directory itself.
+ * pd must not be the active CR3. */
+void     vmm_destroy_address_space(uint32_t *pd);
+
 /* Get kernel master page directory */
 uint32_t *vmm_get_kernel_dir(void);
 

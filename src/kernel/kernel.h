@@ -28,9 +28,22 @@
 #define PAGE_WRITE   (1 << 1)
 #define PAGE_USER    (1 << 2)
 
-/* User space virtual base address */
-#define USER_BASE    0x01000000u   /* 16 MiB */
-#define USER_STACK   0x0FFFF000u   /* User stack top */
+/*
+ * User address space layout (per process, ring 3).
+ *
+ * The kernel is identity-mapped (supervisor only) from 0 up to __free_ram_end
+ * (~66 MiB). User space lives well above that so the two never overlap:
+ *
+ *   0x40000000  USER_BASE        program image (flat binary, linked here)
+ *   ...         (heap/bss follow the image)
+ *   0x7FFFC000  stack bottom     USER_STACK_PAGES pages, grows downward
+ *   0x80000000  USER_STACK       initial user ESP (exclusive top)
+ */
+#define USER_BASE        0x40000000u
+#define USER_LIMIT       0x80000000u   /* First address user code may NOT touch */
+#define USER_STACK       0x80000000u   /* Initial user ESP (top of stack)       */
+#define USER_STACK_PAGES 4
+#define USER_IMAGE_MAX   (1024u * 1024u)
 
 /* =========================================================================
  * GDT Segment Selectors
@@ -113,7 +126,9 @@ struct tss {
  * ========================================================================= */
 
 struct trap_frame {
-    /* Saved by our ISR stub (reverse push order) */
+    /* Segment registers saved by our ISR stub (pushed last, so lowest) */
+    uint32_t gs, fs, es, ds;
+    /* Saved by pusha (reverse push order) */
     uint32_t edi, esi, ebp;
     uint32_t esp_dummy;  /* Pushed by pusha — unusable */
     uint32_t ebx, edx, ecx, eax;
@@ -139,6 +154,7 @@ struct process {
     uint32_t sp;                   /* Kernel stack pointer (when not running) */
     uint32_t *page_table;          /* CR3 value — page directory */
     uint32_t sleep_until;          /* Wake tick for PROC_SLEEPING */
+    struct process *wait_target;   /* Process this one is blocked waiting on */
     int      exit_code;
     char     name[32];
     uint8_t  stack[KERNEL_STACK];  /* Per-process kernel stack */
@@ -268,6 +284,7 @@ void      sleep_ms(uint32_t ms);
 /* Process */
 struct process *create_process(const void *image, size_t image_size, const char *name);
 void      process_exit(int code);
+int       process_wait(struct process *child);   /* Blocks; returns exit code, reaps child */
 
 /* Interrupt handlers (asm stubs) */
 extern void isr0(void);   /* Divide by zero */

@@ -28,6 +28,7 @@
 #include "klog.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "uaccess.h"
 #include "multiboot.h"
 #include "../fs/simplefs.h"
 #include "../fs/vfs.h"
@@ -477,17 +478,28 @@ struct process *idle_proc    = NULL;
 
 static int next_pid = 1;
 
-/* Forward declaration */
+/*
+ * switch_context(prev_sp, next_sp)
+ *
+ * Saves callee-saved registers on the current kernel stack, stores ESP in
+ * *prev_sp, loads ESP from *next_sp and restores the other stack's registers.
+ *
+ * NOTE: i386 cdecl passes arguments on the stack, NOT in registers. The
+ * pointers therefore live at 4(%esp) and 8(%esp) on entry and must be loaded
+ * BEFORE we push anything.
+ */
 __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp);
 
 __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
     __asm__ __volatile__(
+        "movl  4(%esp), %eax\n"   /* prev_sp */
+        "movl  8(%esp), %edx\n"   /* next_sp */
         "pushl %ebp\n"
         "pushl %ebx\n"
         "pushl %esi\n"
         "pushl %edi\n"
-        "movl  %esp, (%eax)\n"  /* eax = prev_sp */
-        "movl  (%edx), %esp\n"  /* edx = next_sp */
+        "movl  %esp, (%eax)\n"    /* save current stack */
+        "movl  (%edx), %esp\n"    /* switch to the other stack */
         "popl  %edi\n"
         "popl  %esi\n"
         "popl  %ebx\n"
@@ -496,48 +508,75 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp)
     );
 }
 
-void yield(void) {
-    struct process *next = idle_proc;
-    int start = current_proc ? current_proc->pid : 0;
-
-    for (int i = 0; i < PROCS_MAX; i++) {
-        int idx = (start + i) % PROCS_MAX;
-        struct process *p = &procs[idx];
-        if (p->state == PROC_RUNNABLE && p != current_proc) {
-            next = p;
-            break;
-        }
-    }
-
-    if (next == current_proc)
-        return;
-
-    struct process *prev = current_proc;
-    current_proc = next;
-
-    if (next->page_table)
-        load_cr3((uint32_t)next->page_table);
-
-    tss_set_kernel_stack((uint32_t)&next->stack[KERNEL_STACK]);
-    switch_context(&prev->sp, &next->sp);
-}
-
-void schedule(void) {
-    /* Check for sleeping processes that should wake up */
+/* Wake every sleeper whose deadline has passed. Safe to call from IRQ0. */
+static void wake_sleepers(void) {
     uint32_t now = ticks;
     for (int i = 0; i < PROCS_MAX; i++) {
         if (procs[i].state == PROC_SLEEPING && procs[i].sleep_until <= now)
             procs[i].state = PROC_RUNNABLE;
     }
+}
+
+/* Round-robin: first RUNNABLE process after the current slot, or NULL. */
+static struct process *pick_next(void) {
+    int start = (int)(current_proc - procs);
+    for (int i = 1; i <= PROCS_MAX; i++) {
+        struct process *p = &procs[(start + i) % PROCS_MAX];
+        if (p != current_proc && p->state == PROC_RUNNABLE)
+            return p;
+    }
+    return NULL;
+}
+
+static bool other_runnable(void) {
+    wake_sleepers();
+    return pick_next() != NULL;
+}
+
+void yield(void) {
+    struct process *prev = current_proc;
+    struct process *next = pick_next();
+
+    if (!next) {
+        /* Nobody else wants the CPU. Keep running if we still can. */
+        if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE)
+            return;
+        /* We are blocked/sleeping/zombie: fall back to the idle/shell task. */
+        next = idle_proc;
+        if (next == prev)
+            return;
+    }
+
+    /* The switch must not be interrupted halfway. Remember each context's own
+     * IF so that it is restored when that context is resumed. */
+    uint32_t eflags;
+    __asm__ __volatile__("pushf\n\tpopl %0\n\tcli" : "=r"(eflags) : : "memory");
+
+    if (prev->state == PROC_RUNNING)
+        prev->state = PROC_RUNNABLE;
+    next->state  = PROC_RUNNING;
+    current_proc = next;
+
+    if (next->page_table)
+        load_cr3((uint32_t)next->page_table);
+
+    /* Ring 3 -> ring 0 transitions must land on THIS process's kernel stack */
+    tss_set_kernel_stack((uint32_t)&next->stack[KERNEL_STACK]);
+    switch_context(&prev->sp, &next->sp);
+
+    __asm__ __volatile__("pushl %0\n\tpopf" : : "r"(eflags) : "memory", "cc");
+}
+
+void schedule(void) {
+    wake_sleepers();
     yield();
 }
 
 void sleep_ms(uint32_t ms) {
     if (!current_proc || current_proc == idle_proc)
         return;
-    uint32_t wake_tick = ticks + (ms / 10);  /* 100 Hz = 10 ms per tick */
     current_proc->state       = PROC_SLEEPING;
-    current_proc->sleep_until = wake_tick;
+    current_proc->sleep_until = ticks + (ms + 9) / 10;  /* 100 Hz = 10 ms per tick */
     yield();
 }
 
@@ -554,68 +593,110 @@ static void idle_task(void) {
 
 /* =========================================================================
  * User Entry Point (for ring 3 processes)
+ *
+ * A freshly created process is first "switched to" like any other, so its
+ * first instruction runs in ring 0 on its own kernel stack. user_entry then
+ * builds an iret frame and drops to ring 3 at USER_BASE with a real user
+ * stack (USER_STACK) -- NOT the kernel stack.
  * ========================================================================= */
 
 __attribute__((naked)) void user_entry(void) {
     __asm__ __volatile__(
-        "mov $0x23, %%ax\n"      /* User data segment (GDT_USER_DATA | RPL_USER = 0x20|3 = 0x23) */
+        "mov $0x23, %%ax\n"      /* GDT_USER_DATA | RPL 3 */
         "mov %%ax, %%ds\n"
         "mov %%ax, %%es\n"
         "mov %%ax, %%fs\n"
         "mov %%ax, %%gs\n"
-        "mov %%esp, %%eax\n"
-        "pushl $0x23\n"          /* SS */
-        "pushl %%eax\n"          /* ESP */
+        "pushl $0x23\n"          /* SS  */
+        "pushl %1\n"             /* ESP: top of the user stack */
         "pushf\n"
         "popl %%eax\n"
-        "orl $0x200, %%eax\n"    /* Enable IF in EFLAGS */
-        "pushl %%eax\n"
-        "pushl $0x1B\n"          /* CS (GDT_USER_CODE | RPL_USER = 0x18|3 = 0x1B) */
+        "orl  $0x200, %%eax\n"   /* IF=1: user code must be interruptible */
+        "andl $0xFFFFCFFF, %%eax\n" /* IOPL=0: no direct port I/O from ring 3 */
+        "pushl %%eax\n"          /* EFLAGS */
+        "pushl $0x1B\n"          /* CS (GDT_USER_CODE | RPL 3) */
         "pushl %0\n"             /* EIP */
         "iret\n"
-        : : "r"(USER_BASE)
+        : : "i"(USER_BASE), "i"(USER_STACK)
     );
 }
 
 /* =========================================================================
- * Create Process
+ * Process lifecycle: create / exit / wait / reap
  * ========================================================================= */
 
-struct process *create_process(const void *image, size_t image_size, const char *name) {
-    struct process *proc = NULL;
+static bool has_waiter(struct process *p) {
+    for (int i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_BLOCKED && procs[i].wait_target == p)
+            return true;
+    }
+    return false;
+}
 
+/* Release a zombie's address space and recycle its slot. */
+static void reap(struct process *p) {
+    if (p == current_proc || p == idle_proc || p->state != PROC_ZOMBIE)
+        return;
+    uint32_t *pd = p->page_table;
+    p->page_table = NULL;
+    p->state      = PROC_UNUSED;
+    vmm_destroy_address_space(pd);   /* pd is never the active CR3 here */
+}
+
+/* Reap zombies nobody is waiting for (e.g. background jobs). */
+static void reap_orphans(void) {
+    for (int i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_ZOMBIE && !has_waiter(&procs[i]))
+            reap(&procs[i]);
+    }
+}
+
+struct process *create_process(const void *image, size_t image_size, const char *name) {
+    reap_orphans();
+
+    if (!image || image_size == 0 || image_size > USER_IMAGE_MAX)
+        return NULL;
+
+    struct process *proc = NULL;
     for (int i = 0; i < PROCS_MAX; i++) {
         if (procs[i].state == PROC_UNUSED) {
             proc = &procs[i];
             break;
         }
     }
-
     if (!proc)
-        PANIC("No free process slots");
+        return NULL;
 
-    /* Set up kernel stack — switch_context will pop these */
-    uint32_t *sp = (uint32_t *)&proc->stack[KERNEL_STACK];
-    *--sp = 0;             /* edi */
-    *--sp = 0;             /* esi */
-    *--sp = 0;             /* ebx */
-    *--sp = 0;             /* ebp */
-    *--sp = (uint32_t)user_entry;  /* return address */
+    /* Private address space. Kernel page tables are SHARED with the kernel
+     * directory (supervisor-only), so this is cheap and stays coherent. */
+    uint32_t *pd = vmm_create_address_space();
+    if (!pd)
+        return NULL;
 
-    /* Create private page directory */
-    uint32_t *pd = (uint32_t *)alloc_pages(1);
-
-    /* Identity-map kernel */
-    for (paddr_t p = 0; p < (paddr_t)__free_ram_end; p += PAGE_SIZE)
-        map_page(pd, p, p, PAGE_WRITE);
-
-    /* Map user image */
-    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
-        paddr_t page  = alloc_pages(1);
-        size_t  chunk = PAGE_SIZE <= (image_size - off) ? PAGE_SIZE : (image_size - off);
+    /* Program image at USER_BASE */
+    for (size_t off = 0; off < image_size; off += PAGE_SIZE) {
+        paddr_t page = pmm_alloc_frame();
+        if (!page) goto oom;
+        size_t chunk = (image_size - off < PAGE_SIZE) ? (image_size - off) : PAGE_SIZE;
         memcpy((void *)page, (const uint8_t *)image + off, chunk);
         map_page(pd, USER_BASE + off, page, PAGE_USER | PAGE_WRITE);
     }
+
+    /* User stack, growing down from USER_STACK */
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        paddr_t page = pmm_alloc_frame();
+        if (!page) goto oom;
+        map_page(pd, USER_STACK - (uint32_t)(i + 1) * PAGE_SIZE, page,
+                 PAGE_USER | PAGE_WRITE);
+    }
+
+    /* Kernel stack: switch_context will pop these, then `ret` into user_entry */
+    uint32_t *sp = (uint32_t *)&proc->stack[KERNEL_STACK];
+    *--sp = (uint32_t)user_entry;  /* return address */
+    *--sp = 0;                     /* ebp */
+    *--sp = 0;                     /* ebx */
+    *--sp = 0;                     /* esi */
+    *--sp = 0;                     /* edi */
 
     proc->pid         = next_pid++;
     proc->state       = PROC_RUNNABLE;
@@ -623,18 +704,51 @@ struct process *create_process(const void *image, size_t image_size, const char 
     proc->page_table  = pd;
     proc->exit_code   = 0;
     proc->sleep_until = 0;
+    proc->wait_target = NULL;
     strncpy(proc->name, name, sizeof(proc->name) - 1);
+    proc->name[sizeof(proc->name) - 1] = '\0';
 
     return proc;
+
+oom:
+    vmm_destroy_address_space(pd);
+    return NULL;
 }
 
 void process_exit(int code) {
-    if (current_proc) {
-        current_proc->exit_code = code;
-        current_proc->state     = PROC_ZOMBIE;
+    struct process *me = current_proc;
+    me->exit_code = code;
+    me->state     = PROC_ZOMBIE;
+
+    /* Wake a parent that is blocked in process_wait() on us */
+    for (int i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_BLOCKED && procs[i].wait_target == me)
+            procs[i].state = PROC_RUNNABLE;
     }
+
     yield();
     PANIC("unreachable after exit");
+}
+
+int process_wait(struct process *child) {
+    struct process *me = current_proc;
+
+    while (child->state != PROC_ZOMBIE) {
+        me->wait_target = child;
+        me->state       = PROC_BLOCKED;
+        yield();
+        if (child->state != PROC_ZOMBIE && !other_runnable()) {
+            /* Nothing to run (child asleep?) -- wait for the next interrupt */
+            __asm__ __volatile__("sti\n\thlt" : : : "memory");
+        }
+    }
+
+    me->wait_target = NULL;
+    me->state       = PROC_RUNNING;
+
+    int code = child->exit_code;
+    reap(child);
+    return code;
 }
 
 /* =========================================================================
@@ -743,6 +857,14 @@ static void handle_exception(struct trap_frame *f) {
 
     const char *name = (f->int_no < 15) ? names[f->int_no] : "Unknown Exception";
 
+    /* A fault in ring 3 is the PROCESS's bug, not the kernel's: terminate it
+     * and keep the system alive. Only ring 0 faults are fatal. */
+    if ((f->cs & 3) == 3 && current_proc && current_proc != idle_proc) {
+        printf("\n[kernel] pid %d (%s) crashed: #%u %s at eip=0x%08x err=0x%x -- terminated\n",
+               current_proc->pid, current_proc->name, f->int_no, name, f->eip, f->err_code);
+        process_exit(-1);
+    }
+
     cli();
     vga_set_color(0x0C);
     printf("\n\n==============================================\n");
@@ -774,8 +896,23 @@ static void handle_exception(struct trap_frame *f) {
     while (1) halt();
 }
 
+#define SYSCALL_PATH_MAX 256
+#define SYSCALL_FAIL     ((uint32_t)-1)
+
+/*
+ * Syscall ABI (int 0x80):
+ *   eax = syscall number, ebx/ecx/edx = arguments
+ *   eax = return value on exit (-1 on error)
+ *
+ * Every pointer argument comes from ring 3 and is validated with
+ * user_range_ok()/user_strncpy() before the kernel touches it.
+ */
 static void handle_syscall(struct trap_frame *f) {
-    switch (f->eax) {
+    uint32_t nr = f->eax;
+    char kpath[SYSCALL_PATH_MAX];
+    f->eax = 0;
+
+    switch (nr) {
         case SYS_PUTCHAR:
             putchar((char)f->ebx);
             break;
@@ -785,66 +922,84 @@ static void handle_syscall(struct trap_frame *f) {
                 if (ch < 0)
                     ch = (int)serial_getchar();
                 if (ch >= 0) {
-                    f->ebx = (uint32_t)ch;
+                    f->eax = (uint32_t)ch;
                     break;
                 }
-                yield();
+                if (other_runnable())
+                    yield();
+                else
+                    __asm__ __volatile__("sti\n\thlt\n\tcli" : : : "memory");
             }
             break;
         case SYS_EXIT:
             printf("[sys] process %d exited with code %d\n",
                    current_proc ? current_proc->pid : 0, (int)f->ebx);
-            if (current_proc) current_proc->state = PROC_ZOMBIE;
-            yield();
+            process_exit((int)f->ebx);
             break;
         case SYS_READFILE: {
-            const char *path = (const char *)f->ebx;
             void *buf = (void *)f->ecx;
             size_t len = (size_t)f->edx;
-            struct file *file = vfs_open(path, FILE_READ, 0);
-            if (!file) { f->eax = (uint32_t)-1; break; }
+            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
+                !user_range_ok(buf, len, true)) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            struct file *file = vfs_open(kpath, FILE_READ, 0);
+            if (!file) { f->eax = SYSCALL_FAIL; break; }
             int n = vfs_read(file, buf, len);
             vfs_close(file);
             f->eax = (uint32_t)n;
             break;
         }
         case SYS_WRITEFILE: {
-            const char *path = (const char *)f->ebx;
             const void *buf = (const void *)f->ecx;
             size_t len = (size_t)f->edx;
-            struct file *file = vfs_open(path, FILE_WRITE, VFS_PERM_DEFAULT_FILE);
-            if (!file) { f->eax = (uint32_t)-1; break; }
+            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
+                !user_range_ok(buf, len, false)) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            struct file *file = vfs_open(kpath, FILE_WRITE, VFS_PERM_DEFAULT_FILE);
+            if (!file) { f->eax = SYSCALL_FAIL; break; }
             int n = vfs_write(file, buf, len);
             vfs_close(file);
             f->eax = (uint32_t)n;
             break;
         }
-        case SYS_LS: {
-            const char *path = (const char *)f->ebx;
-            vibefs_ls(path ? path : "/");
-            f->eax = 0;
+        case SYS_LS:
+            if (f->ebx == 0) {
+                vibefs_ls("/");
+            } else if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
+                f->eax = SYSCALL_FAIL; break;
+            } else {
+                vibefs_ls(kpath);
+            }
             break;
-        }
-        case SYS_MKDIR: {
-            const char *path = (const char *)f->ebx;
-            f->eax = (uint32_t)vfs_mkdir(path, VFS_PERM_DEFAULT_DIR);
+        case SYS_MKDIR:
+            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            f->eax = (uint32_t)vfs_mkdir(kpath, VFS_PERM_DEFAULT_DIR);
             break;
-        }
-        case SYS_UNLINK: {
-            const char *path = (const char *)f->ebx;
-            f->eax = (uint32_t)vfs_unlink(path);
+        case SYS_UNLINK:
+            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            f->eax = (uint32_t)vfs_unlink(kpath);
             break;
-        }
         case SYS_STAT: {
-            const char *path = (const char *)f->ebx;
             struct vstat *st = (struct vstat *)f->ecx;
-            f->eax = (uint32_t)vfs_stat(path, st);
+            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
+                !user_range_ok(st, sizeof *st, true)) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            f->eax = (uint32_t)vfs_stat(kpath, st);
             break;
         }
         case SYS_TIME: {
             struct rtc_time *t = (struct rtc_time *)f->ebx;
-            if (t) rtc_get_time(t);
-            f->eax = 0;
+            if (!user_range_ok(t, sizeof *t, true)) {
+                f->eax = SYSCALL_FAIL; break;
+            }
+            rtc_get_time(t);
             break;
         }
         case SYS_GETPID:
@@ -860,8 +1015,8 @@ static void handle_syscall(struct trap_frame *f) {
             f->eax = get_uptime_ms();
             break;
         default:
-            printf("[syscall] Unknown: %u (eip=0x%08x)\n", f->eax, f->eip);
-            f->eax = (uint32_t)-1;
+            printf("[syscall] Unknown: %u (eip=0x%08x)\n", nr, f->eip);
+            f->eax = SYSCALL_FAIL;
             break;
     }
 }
@@ -884,10 +1039,13 @@ void handle_interrupt(struct trap_frame *f) {
     if (n == 32) {
         /* PIT Timer — IRQ0 */
         ticks++;
-        pic_eoi(0);
-        /* Preempt: every tick, schedule */
-        if (current_proc && current_proc != idle_proc)
-            schedule();
+        pic_eoi(0);          /* EOI first: we may not come back through here soon */
+        wake_sleepers();
+        /* Preempt only code that was interrupted in ring 3. A tick that lands
+         * while the kernel is mid-syscall must not switch away: kernel data
+         * structures are not (yet) protected against reentrancy. */
+        if ((f->cs & 3) == 3 && current_proc && current_proc != idle_proc)
+            yield();
         return;
     }
 
@@ -1096,6 +1254,10 @@ static void cmd_help(void) {
     printf("  mv <src> <dst>   Rename/move file\n");
     printf("  stat <path>      Show file information\n");
     printf("  hexdump <file>   Hex dump file contents\n");
+    printf("--- Ring 3 programs ---\n");
+    printf("  progs            List built-in user programs\n");
+    printf("  run <p> [&]      Run program in user mode (& = background)\n");
+    printf("  usertest         Two CPU hogs: preemption demo\n");
     printf("--- System ---\n");
     printf("  uname            System information\n");
     printf("  uptime           System uptime\n");
@@ -1325,6 +1487,92 @@ static void cmd_ps(void) {
             printf("%-4d %s  %s\n", procs[i].pid, sn, procs[i].name);
         }
     }
+}
+
+/* --- Built-in ring 3 programs (embedded by userprog.S) ------------------- */
+
+extern const uint8_t user_hello_start[], user_hello_end[];
+extern const uint8_t user_spin_start[],  user_spin_end[];
+extern const uint8_t user_crash_start[], user_crash_end[];
+extern const uint8_t user_segv_start[],  user_segv_end[];
+extern const uint8_t user_upper_start[], user_upper_end[];
+
+struct user_prog {
+    const char    *name;
+    const char    *desc;
+    const uint8_t *start;
+    const uint8_t *end;
+};
+
+static const struct user_prog user_progs[] = {
+    { "hello", "syscalls + kernel pointer validation", user_hello_start, user_hello_end },
+    { "spin",  "CPU hog, never yields (preemption demo)", user_spin_start,  user_spin_end  },
+    { "crash", "executes cli in ring 3 (#GP)",           user_crash_start, user_crash_end },
+    { "segv",  "writes kernel memory (page fault)",      user_segv_start,  user_segv_end  },
+    { "upper", "blocking getchar: echoes a line in CAPS", user_upper_start, user_upper_end },
+};
+
+static const struct user_prog *find_user_prog(const char *name) {
+    for (size_t i = 0; i < ARRAY_SIZE(user_progs); i++) {
+        if (strcmp(user_progs[i].name, name) == 0)
+            return &user_progs[i];
+    }
+    return NULL;
+}
+
+static struct process *spawn_user(const char *name) {
+    const struct user_prog *prog = find_user_prog(name);
+    if (!prog) {
+        printf("run: no such program '%s' (try 'progs')\n", name);
+        return NULL;
+    }
+    struct process *p = create_process(prog->start, (size_t)(prog->end - prog->start), prog->name);
+    if (!p)
+        printf("run: cannot create process (out of slots or memory)\n");
+    return p;
+}
+
+static void cmd_progs(void) {
+    printf("Built-in ring 3 programs:\n");
+    for (size_t i = 0; i < ARRAY_SIZE(user_progs); i++)
+        printf("  %-6s %s (%u bytes)\n", user_progs[i].name, user_progs[i].desc,
+               (unsigned)(user_progs[i].end - user_progs[i].start));
+}
+
+/* run <prog> [&]  — start a program in ring 3; wait for it unless backgrounded */
+static void cmd_run(const char *args) {
+    while (*args == ' ') args++;
+
+    char name[32];
+    size_t n = 0;
+    while (args[n] && args[n] != ' ' && n < sizeof(name) - 1) { name[n] = args[n]; n++; }
+    name[n] = '\0';
+    if (n == 0) { printf("Usage: run <program> [&]   (see 'progs')\n"); return; }
+
+    bool background = (strchr(args + n, '&') != NULL);
+
+    struct process *p = spawn_user(name);
+    if (!p) return;
+
+    if (background) {
+        printf("[%d] %s started in background\n", p->pid, p->name);
+        return;
+    }
+    int pid = p->pid;
+    int code = process_wait(p);
+    printf("[%d] %s finished, exit code %d\n", pid, name, code);
+}
+
+/* usertest — two CPU hogs at once: output must interleave if preemption works */
+static void cmd_usertest(void) {
+    printf("Starting two 'spin' processes (they never call yield)...\n");
+    struct process *a = spawn_user("spin");
+    struct process *b = spawn_user("spin");
+    if (!a || !b) return;
+    int pa = a->pid, pb = b->pid;
+    int ca = process_wait(a);
+    int cb = process_wait(b);
+    printf("[usertest] pid %d exit %d, pid %d exit %d\n", pa, ca, pb, cb);
 }
 
 static void cmd_ping(const char *ip_str) {
@@ -1815,6 +2063,8 @@ static void run_shell(void) {
     char cwd_buf[VFS_PATH_MAX];
 
     while (1) {
+        reap_orphans();   /* collect finished background jobs */
+
         /* Show cwd in prompt */
         vfs_get_cwd(cwd_buf, sizeof(cwd_buf));
 
@@ -1967,6 +2217,14 @@ static void run_shell(void) {
             cmd_udpsend(cmdline + 8);
         } else if (strncmp(cmdline, "udplisten ", 10) == 0) {
             cmd_udplisten(cmdline + 10);
+
+        /* --- Ring 3 programs --- */
+        } else if (strncmp(cmdline, "run ", 4) == 0) {
+            cmd_run(cmdline + 4);
+        } else if (strcmp(cmdline, "progs") == 0) {
+            cmd_progs();
+        } else if (strcmp(cmdline, "usertest") == 0) {
+            cmd_usertest();
 
         } else if (strcmp(cmdline, "clear") == 0) {
             vga_clear();
@@ -2160,12 +2418,17 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
     strncpy(idle_proc->name, "idle", sizeof(idle_proc->name) - 1);
 
     uint32_t *sp = (uint32_t *)&idle_proc->stack[KERNEL_STACK];
-    *--sp = 0;             /* edi */
-    *--sp = 0;             /* esi */
-    *--sp = 0;             /* ebx */
+    *--sp = (uint32_t)idle_task;   /* return address (popped last) */
     *--sp = 0;             /* ebp */
-    *--sp = (uint32_t)idle_task;
+    *--sp = 0;             /* ebx */
+    *--sp = 0;             /* esi */
+    *--sp = 0;             /* edi (popped first) */
     idle_proc->sp = (uint32_t)sp;
+
+    /* The idle/shell task runs on the kernel directory so it never keeps a
+     * dead process's page directory loaded after a context switch. */
+    idle_proc->page_table = vmm_get_kernel_dir();
+    idle_proc->state      = PROC_RUNNING;
 
     current_proc = idle_proc;
     tss_set_kernel_stack((uint32_t)&idle_proc->stack[KERNEL_STACK]);

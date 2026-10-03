@@ -1,4 +1,4 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-user
 
 # ============================================================
 # VibeCagOS Build System
@@ -31,7 +31,7 @@ NET_DIR    := src/net
 INCLUDES := -Isrc -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o \
+OBJS := boot.o interrupts.o userprog.o uaccess.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         simplefs.o \
         vibefs.o vfs.o procfs.o devfs.o \
@@ -53,11 +53,36 @@ QEMU_SMP := $(QEMU_COMMON) -smp 2
 
 all: os.iso
 
+# ------------------------------------------------------------
+# User programs (ring 3 flat binaries, embedded into the kernel)
+# ------------------------------------------------------------
+USER_PROGS := hello spin crash segv upper
+USER_BINS  := $(addprefix user/,$(addsuffix .bin,$(USER_PROGS)))
+
+USER_CFLAGS := -std=c11 -O2 -Wall -Wextra -m32 -fuse-ld=lld -static \
+               -ffreestanding -nostdlib -fno-pie -no-pie \
+               -fno-stack-protector -mno-sse -mno-mmx \
+               -Isrc/kernel -Iuser -Wno-unused-command-line-argument
+
+user/%.elf: user/%.c user/ulib.h user/user.ld $(KERNEL_DIR)/common.h
+	$(CC) $(USER_CFLAGS) -Wl,-Tuser/user.ld -o $@ $<
+
+user/%.bin: user/%.elf
+	$(OBJCOPY) -O binary $< $@
+
+.PRECIOUS: user/%.elf
+
+userprog.o: $(KERNEL_DIR)/userprog.S $(USER_BINS)
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+uaccess.o: $(KERNEL_DIR)/uaccess.c $(KERNEL_DIR)/uaccess.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/kernel.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # Assembly
 boot.o: $(KERNEL_DIR)/boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-interrupts.o: $(KERNEL_DIR)/interrupts.s
+interrupts.o: $(KERNEL_DIR)/interrupts.s $(KERNEL_DIR)/kernel.h
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 # Kernel C files
@@ -67,7 +92,8 @@ kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
            $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
            $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
-           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h
+           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h \
+           $(KERNEL_DIR)/uaccess.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 common.o: $(KERNEL_DIR)/common.c $(KERNEL_DIR)/common.h
@@ -184,6 +210,11 @@ test: os.iso disk.img
 	@echo "Running QEMU integration test (serial output)..."
 	@printf '\nhelp\npwd\ndate\nfree\ndevices\npci\nls\necho VibeCagOS_Automated_Test_OK > /tmp/test.txt\ncat /tmp/test.txt\ncp /tmp/test.txt /tmp/copy.txt\nhead /tmp/copy.txt\nstat /tmp/copy.txt\ncat /proc/version\ncat /proc/meminfo\ncat /etc/version\ndmesg\nexit\n' | timeout 12 $(QEMU) $(QEMU_COMMON) -display none 2>&1
 
+# Ring 3 / scheduler / syscall-validation integration test
+test-user: os.iso disk.img
+	@echo "Running ring 3 integration test (serial output)..."
+	@printf '\nrun hello\nrun segv\nrun crash\nusertest\nps\nexit\n' | timeout 40 $(QEMU) $(QEMU_COMMON) -display none 2>&1
+
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img
 	@echo "Starting QEMU with GDB stub on port 1234..."
@@ -204,7 +235,7 @@ symbols: kernel.elf
 # ============================================================
 
 clean:
-	rm -f *.o *.elf *.map os.iso disk.img
+	rm -f *.o *.elf *.map os.iso disk.img user/*.elf user/*.bin
 	rm -rf isodir
 
 help:

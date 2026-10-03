@@ -17,7 +17,7 @@ VibeCagOS is a real operating system kernel that:
 - Provides a **Virtual Filesystem (VFS)** layer abstracting storage devices and pseudo-filesystems
 - Implements **VibeFS**, a hierarchical persistent disk filesystem with directories, subdirectories, inodes, and `.` / `..` traversal
 - Mounts **procfs** at `/proc` offering dynamic kernel introspection (`/proc/version`, `/proc/uptime`, `/proc/meminfo`, `/proc/cpuinfo`)
-- Has a **preemptive scheduler** driven by a 100 Hz PIT timer
+- Has a **preemptive scheduler** driven by a 100 Hz PIT timer, scheduling **real ring 3 user processes** (private address spaces, validated syscalls)
 - Handles **CPU exceptions** with detailed register dumps
 - Supports **PS/2 keyboard** and serial console simultaneously
 - Has **paging enabled** with a kernel identity map
@@ -64,6 +64,32 @@ make debug
 
 # Terminal 2 — connect
 gdb kernel.elf -ex 'target remote :1234' -ex 'break kernel_main' -ex 'continue'
+```
+
+---
+
+## User Mode (Ring 3)
+
+User programs run in ring 3 with a private page directory. The kernel is
+identity-mapped but supervisor-only; user space lives at `0x40000000`:
+
+```
+0x40000000  program image (flat binary)      0x7FFFC000-0x80000000  user stack
+```
+
+- **Syscalls** use `int 0x80` (DPL 3 gate): `eax` = number, `ebx/ecx/edx` = args, result in `eax`.
+  Every pointer argument is validated (`src/kernel/uaccess.c`) before the kernel touches it.
+- **Preemption**: the PIT timer switches away from ring 3 code. Ticks that land while the kernel is
+  inside a syscall do not preempt (the kernel is not reentrant yet).
+- **Faults in ring 3** (#GP, #PF, ...) terminate only the offending process.
+- Programs live in `user/` (runtime in `user/ulib.h`, linker script `user/user.ld`), are built to flat
+  binaries and embedded into the kernel image by `src/kernel/userprog.S`.
+
+```
+progs            list built-in user programs
+run <prog> [&]   run a program in ring 3 (& = background)
+usertest         two CPU hogs; their output interleaves if preemption works
+make test-user   scripted ring 3 integration test under QEMU
 ```
 
 ---

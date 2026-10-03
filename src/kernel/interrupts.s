@@ -28,11 +28,31 @@ isr_common:
      * NOTE: The pushed ESP is pre-PUSHA value, used as padding in trap_frame.
      */
     pusha
+    cld                         /* C code assumes DF=0 */
+
+    /* Save the interrupted context's data segments, then switch to kernel
+     * data segments. Without this the kernel would keep running with user
+     * selectors (0x23) after the first ring 3 -> ring 0 transition. */
+    pushl %ds
+    pushl %es
+    pushl %fs
+    pushl %gs
+    movw  $0x10, %ax            /* GDT_KERNEL_DATA */
+    movw  %ax, %ds
+    movw  %ax, %es
+    movw  %ax, %fs
+    movw  %ax, %gs
 
     /* Pass pointer to trap_frame (the current stack pointer) */
     pushl %esp
     call  handle_interrupt
     addl  $4, %esp
+
+    /* Restore the interrupted context's segments */
+    popl  %gs
+    popl  %fs
+    popl  %es
+    popl  %ds
 
     /* Restore all general purpose registers */
     popa

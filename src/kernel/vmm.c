@@ -25,6 +25,12 @@ void vmm_map_page(uint32_t *pd, vaddr_t vaddr, paddr_t paddr, uint32_t flags) {
         pd[pde_idx] = pt_paddr | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | (flags & VMM_FLAG_USER);
     }
 
+    /* x86 checks U/S on BOTH the PDE and the PTE. If a user mapping lands in a
+     * page table that was first created for a supervisor-only mapping, the PDE
+     * must be upgraded or ring 3 will fault on a perfectly valid PTE. */
+    if (flags & VMM_FLAG_USER)
+        pd[pde_idx] |= VMM_FLAG_USER;
+
     uint32_t *page_table = (uint32_t *)(pd[pde_idx] & ~0xFFFu);
     page_table[pte_idx]  = (paddr & ~0xFFFu) | (flags & 0xFFFu) | VMM_FLAG_PRESENT;
     vmm_invlpg(vaddr);
@@ -98,6 +104,44 @@ uint32_t *vmm_create_address_space(void) {
         pd[i] = kernel_page_dir[i];
     }
     return pd;
+}
+
+bool vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write) {
+    uint32_t pde = pd[vaddr >> 22];
+    if (!(pde & VMM_FLAG_PRESENT) || !(pde & VMM_FLAG_USER))
+        return false;
+
+    uint32_t *page_table = (uint32_t *)(pde & ~0xFFFu);
+    uint32_t pte = page_table[(vaddr >> 12) & 0x3FF];
+    if (!(pte & VMM_FLAG_PRESENT) || !(pte & VMM_FLAG_USER))
+        return false;
+    if (write && !(pte & VMM_FLAG_WRITABLE))
+        return false;
+    return true;
+}
+
+/*
+ * Free everything a process owns in the user half of its address space
+ * (pages, page tables) and then the page directory itself.
+ *
+ * Kernel PDEs are shared with kernel_page_dir (same page tables), so only
+ * PDEs covering [USER_BASE, USER_LIMIT) are touched. Must NOT be called while
+ * pd is the active CR3.
+ */
+void vmm_destroy_address_space(uint32_t *pd) {
+    if (!pd || pd == kernel_page_dir) return;
+
+    for (uint32_t i = USER_BASE >> 22; i < (USER_LIMIT >> 22); i++) {
+        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
+        uint32_t *page_table = (uint32_t *)(pd[i] & ~0xFFFu);
+        for (int j = 0; j < 1024; j++) {
+            if (page_table[j] & VMM_FLAG_PRESENT)
+                pmm_free_frame(page_table[j] & ~0xFFFu);
+        }
+        pmm_free_frame((paddr_t)page_table);
+        pd[i] = 0;
+    }
+    pmm_free_frame((paddr_t)pd);
 }
 
 void vmm_switch_dir(uint32_t *pd) {
