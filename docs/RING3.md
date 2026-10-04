@@ -43,3 +43,19 @@ Never dereferenced by the kernel. `copy_from_user / copy_to_user / strncpy_from_
 ## Tests (`make test-all`)
 `tests/run.sh <ring3|syscall|scheduler|usercopy|faults>` boots QEMU headless, drives the kernel shell over
 serial (`utest <n>`, `utest2 <a> <b>`, `uspawn <n>`) and greps the serial log. Test programs: `src/user/utest.c`.
+
+## File descriptors (M8/M9)
+`user fd -> current_proc->fds[fd] -> { console | struct file } -> VFS -> VibeFS -> IDE`
+* fd 0 = stdin (console, read-only, blocking), fd 1/2 = stdout/stderr (console, write-only), bound at process creation.
+  The console is the kernel TTY: keyboard IRQ1 + serial poll in, VGA + serial out. Ring 3 never touches VGA or port 0x60.
+* New fds are the lowest free slot >= 3, `OPEN_MAX` = 16 (`-EMFILE` when full). All fds are closed at process exit/kill.
+* Syscalls: OPEN CLOSE READ WRITE LSEEK STAT FSTAT MKDIR UNLINK RMDIR READDIR (contracts in `src/abi/syscall.h`).
+  Errors are `-errno` (VFS errors are translated in `sysfile.c`). Paths are copied with `strncpy_from_user`.
+* Known limits: the VFS cwd is still global (not per process); no dup/pipe yet; `O_RDONLY` write -> `-EBADF` (POSIX).
+
+## Two bugs found while stress-testing (both pre-existing, now fixed)
+* `klog()` ended with an unconditional `sti()`: it enabled interrupts during early boot (before the PIC was
+  remapped -> IRQ0 hit vector 8 = double fault) and inside ISRs. It now uses `irq_save/irq_restore`.
+* The Ring-0 shell moved from the large boot stack to a process kernel stack; 8 KiB overflowed into the
+  neighbouring stack. `KERNEL_STACK` is 32 KiB and a canary at the bottom of every stack is checked on each
+  context switch (`kernel stack overflow` panic instead of silent corruption).

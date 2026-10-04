@@ -37,12 +37,19 @@
 #include "pmm.h"
 #include "klog.h"
 #include "../abi/syscall.h"
+#include "../fs/vfs.h"
 
 struct process procs[PROCS_MAX];
 struct process *current_proc = NULL;
 struct process *idle_proc    = NULL;
 
 static int next_pid = 1;
+
+static inline void stack_canary_set(struct process *p)   { *(volatile uint32_t *)p->stack = STACK_CANARY; }
+static inline void stack_canary_check(struct process *p) {
+    if (*(volatile uint32_t *)p->stack != STACK_CANARY)
+        PANIC("kernel stack overflow in pid %d (%s)", p->pid, p->name);
+}
 
 static inline uint32_t kstack_top(struct process *p) {
     return (uint32_t)&p->stack[KERNEL_STACK];
@@ -57,6 +64,7 @@ static inline uint32_t kstack_top(struct process *p) {
 static void schedule_locked(void) {
     struct process *prev = current_proc;
     struct process *next = NULL;
+    stack_canary_check(prev);
 
     if (prev->state == PROC_RUNNING)
         prev->state = PROC_RUNNABLE;
@@ -193,6 +201,7 @@ struct process *process_create_kthread(const char *name, void (*entry)(void)) {
     p->kentry = entry;
     strncpy(p->name, name, sizeof(p->name) - 1);
 
+    stack_canary_set(p);
     uint32_t *sp = (uint32_t *)kstack_top(p);
     *--sp = 0;                                   /* fake return for kthread_start */
     sp = push_switch_frame(sp, (uint32_t)kthread_start);
@@ -257,10 +266,12 @@ struct process *process_create_user(const char *name, const void *image,
     p->user_esp   = USER_STACK_TOP - 16;
     p->ppid       = 0;
     strncpy(p->name, name, sizeof(p->name) - 1);
+    fd_init_std(p);
 
     /* Initial kernel stack:
      *   [ trap_frame (ring-3 iret frame) ][ ret=trapret + callee-saved ]
      */
+    stack_canary_set(p);
     uint32_t top = kstack_top(p);
     struct trap_frame *tf = (struct trap_frame *)(top - sizeof(*tf));
     memset(tf, 0, sizeof(*tf));
@@ -293,6 +304,7 @@ fail:
 void process_exit(int code) {
     cli();
     struct process *p = current_proc;
+    fd_close_all(p);                    /* release open files */
     p->exit_code = code;
     p->state     = PROC_ZOMBIE;
     wakeup(p);                          /* process_wait() sleeps on the child */
@@ -321,6 +333,7 @@ int process_kill(int pid) {
         struct process *p = &procs[i];
         if (p->pid == pid && p->state != PROC_UNUSED && p != current_proc) {
             if (p->state == PROC_ZOMBIE) { irq_restore(fl); return -2; }
+            fd_close_all(p);
             p->exit_code = -9;
             p->state     = PROC_ZOMBIE;
             wakeup(p);

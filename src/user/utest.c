@@ -104,6 +104,82 @@ int user_main(int test) {
         puts_("T11: SURVIVED\n");
         return 0;
     }
+    case 13: {  /* stdio fds: stdout/stderr writable, stdin not, fstat says chardev */
+        struct vibe_stat st;
+        puts_("T13: stdout="); putint(sys_write(1, "ok", 2)); puts_("\n");
+        puts_("T13: stderr="); putint(sys_write(2, "ok", 2)); puts_("\n");
+        puts_("T13: write_stdin="); putint(sys_write(0, "x", 1)); puts_("\n");
+        puts_("T13: read_stdout="); { char c; putint(sys_read(1, &c, 1)); } puts_("\n");
+        puts_("T13: fstat0="); putint(sys_fstat(0, &st)); puts_(" type="); putint((int)st.type); puts_("\n");
+        puts_("T13: close_bad="); putint(sys_close(99)); puts_("\n");
+        return 0;
+    }
+    case 14: {  /* stdin: blocking read from the console (keyboard/serial) */
+        char buf[16];
+        puts_("T14: waiting\n");
+        int n = sys_read(0, buf, sizeof(buf));
+        puts_("T14: read="); putint(n); puts_(" data=");
+        if (n > 0) sys_write(1, buf, (u32)(n > 0 && buf[n-1] == '\n' ? n - 1 : n));
+        puts_("\n");
+        return 0;
+    }
+    case 15: {  /* file I/O through fds */
+        char buf[32]; struct vibe_stat st; int fd, n;
+        fd = sys_open("/t15.txt", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        puts_("T15: open_create="); putint(fd); puts_("\n");
+        puts_("T15: write="); putint(sys_write(fd, "hello fs", 8)); puts_("\n");
+        puts_("T15: read_on_wronly="); putint(sys_read(fd, buf, 4)); puts_("\n");
+        puts_("T15: close="); putint(sys_close(fd)); puts_("\n");
+        puts_("T15: close_again="); putint(sys_close(fd)); puts_("\n");
+
+        fd = sys_open("/t15.txt", O_RDONLY, 0);
+        n = sys_read(fd, buf, sizeof(buf));
+        puts_("T15: read="); putint(n); puts_(" data="); sys_write(1, buf, (u32)(n > 0 ? n : 0)); puts_("\n");
+        puts_("T15: write_on_rdonly="); putint(sys_write(fd, "x", 1)); puts_("\n");
+        puts_("T15: lseek="); putint(sys_lseek(fd, 6, SEEK_SET));
+        n = sys_read(fd, buf, sizeof(buf));
+        puts_(" tail="); sys_write(1, buf, (u32)(n > 0 ? n : 0)); puts_("\n");
+        puts_("T15: fstat="); putint(sys_fstat(fd, &st)); puts_(" size="); putint((int)st.size);
+        puts_(" type="); putint((int)st.type); puts_("\n");
+        sys_close(fd);
+
+        puts_("T15: stat="); putint(sys_stat("/t15.txt", &st)); puts_(" size="); putint((int)st.size); puts_("\n");
+        puts_("T15: open_missing="); putint(sys_open("/nope", O_RDONLY, 0)); puts_("\n");
+        puts_("T15: stat_missing="); putint(sys_stat("/nope", &st)); puts_("\n");
+        puts_("T15: open_badptr="); putint(sys_open((const char *)0x00100000, O_RDONLY, 0)); puts_("\n");
+        puts_("T15: stat_badbuf="); putint(sys_stat("/t15.txt", (struct vibe_stat *)0x00100000)); puts_("\n");
+
+        /* append + truncate */
+        fd = sys_open("/t15.txt", O_WRONLY | O_APPEND, 0);
+        sys_write(fd, "!!", 2); sys_close(fd);
+        sys_stat("/t15.txt", &st); puts_("T15: after_append_size="); putint((int)st.size); puts_("\n");
+        fd = sys_open("/t15.txt", O_WRONLY | O_TRUNC, 0); sys_close(fd);
+        sys_stat("/t15.txt", &st); puts_("T15: after_trunc_size="); putint((int)st.size); puts_("\n");
+
+        /* directories */
+        puts_("T15: mkdir="); putint(sys_mkdir("/d15", 0755)); puts_("\n");
+        puts_("T15: mkdir_again="); putint(sys_mkdir("/d15", 0755)); puts_("\n");
+        sys_stat("/d15", &st); puts_("T15: dir_type="); putint((int)st.type); puts_("\n");
+        fd = sys_open("/", O_RDONLY, 0);
+        { struct vibe_dirent d; int found = 0, cnt = 0;
+          while (sys_readdir(fd, &d, 1) == 1 && cnt < 64) { cnt++;
+              if (d.name[0]=='d' && d.name[1]=='1' && d.name[2]=='5' && d.name[3]==0) found = 1; }
+          puts_("T15: readdir_found_d15="); putint(found); puts_("\n"); }
+        puts_("T15: write_dir="); putint(sys_open("/d15", O_WRONLY, 0)); puts_("\n");
+        sys_close(fd);
+        puts_("T15: rmdir="); putint(sys_rmdir("/d15")); puts_("\n");
+        puts_("T15: unlink="); putint(sys_unlink("/t15.txt")); puts_("\n");
+        puts_("T15: stat_after_unlink="); putint(sys_stat("/t15.txt", &st)); puts_("\n");
+        return 0;
+    }
+    case 16: {  /* fd exhaustion: 13 free slots (3..15), then EMFILE; close all */
+        int fds[20], n = 0, last = 0;
+        for (int i = 0; i < 20; i++) { last = sys_open("/", O_RDONLY, 0); if (last < 0) break; fds[n++] = last; }
+        puts_("T16: opened="); putint(n); puts_(" then="); putint(last); puts_("\n");
+        for (int i = 0; i < n; i++) sys_close(fds[i]);
+        puts_("T16: reopen="); putint(sys_open("/", O_RDONLY, 0)); puts_("\n");
+        return 0;     /* exits WITH an fd still open: kernel must release it */
+    }
     case 12: {  /* exit status */
         return 42;
     }

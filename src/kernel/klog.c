@@ -98,7 +98,8 @@ void klog(int level, const char *subsystem, const char *fmt, ...) {
     if (level < KLOG_LEVEL) return;
 
     /* Disable interrupts to prevent buffer corruption from IRQ klog calls */
-    cli();
+    uint32_t irq_flags = irq_save();   /* restore, never blindly sti(): we may be in an ISR
+                                          or before the PIC is remapped */
 
     /* Clamp level */
     if (level < 0) level = 0;
@@ -163,7 +164,7 @@ void klog(int level, const char *subsystem, const char *fmt, ...) {
     va_end(args);
     ring_putc('\n');
 
-    sti();
+    irq_restore(irq_flags);
 }
 
 /* =========================================================================

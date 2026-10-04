@@ -15,6 +15,19 @@
  *   SYS_UPTIME  ()                  returns ms             -
  *   SYS_PUTCHAR (c)                 -                      -
  *   SYS_GETINFO (struct vibe_info*) -                      writes user buf
+ *   SYS_OPEN    (path, flags, mode) -> fd   fs I/O, no sleep   reads path
+ *   SYS_CLOSE   (fd)
+ *   SYS_STAT    (path, vibe_stat*)  fs I/O                     path + writes buf
+ *   SYS_FSTAT   (fd, vibe_stat*)                               writes buf
+ *   SYS_MKDIR   (path, mode)        fs I/O                     reads path
+ *   SYS_UNLINK  (path)              fs I/O                     reads path
+ *   SYS_RMDIR   (path)              fs I/O                     reads path
+ *   SYS_LSEEK   (fd, off, whence) -> new offset
+ *   SYS_READDIR (fd, vibe_dirent*, max) -> count (0 = end)     writes buf
+ *
+ * File descriptors: per-process table. fd 0 = stdin (console, read only),
+ * fd 1 = stdout, fd 2 = stderr (console, write only). New fds are the
+ * lowest free index >= 3.
  */
 #ifndef VIBE_ABI_SYSCALL_H
 #define VIBE_ABI_SYSCALL_H
@@ -28,13 +41,64 @@
 #define SYS_UPTIME   7
 #define SYS_PUTCHAR  8
 #define SYS_GETINFO  9
-#define SYS_MAX      9
+#define SYS_OPEN    10
+#define SYS_CLOSE   11
+#define SYS_STAT    12
+#define SYS_MKDIR   13
+#define SYS_UNLINK  14
+#define SYS_LSEEK   15
+#define SYS_READDIR 16
+#define SYS_RMDIR   17
+#define SYS_FSTAT   18
+#define SYS_MAX     18
 
 #define E_PERM    1
+#define E_NOENT   2
+#define E_IO      5
 #define E_BADF    9
+#define E_NOMEM  12
+#define E_ACCES  13
 #define E_FAULT  14
+#define E_EXIST  17
+#define E_NOTDIR 20
+#define E_ISDIR  21
 #define E_INVAL  22
+#define E_MFILE  24
+#define E_NOSPC  28
+#define E_NAMETOOLONG 36
 #define E_NOSYS  38
+#define E_NOTEMPTY 39
+
+/* open() flags (Linux-compatible values) */
+#define O_RDONLY   0x000
+#define O_WRONLY   0x001
+#define O_RDWR     0x002
+#define O_CREAT    0x040
+#define O_TRUNC    0x200
+#define O_APPEND   0x400
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+#define VIBE_TYPE_REG 1
+#define VIBE_TYPE_DIR 2
+#define VIBE_TYPE_CHR 4
+
+struct vibe_stat {
+    unsigned int ino;
+    unsigned int type;     /* VIBE_TYPE_* */
+    unsigned int mode;
+    unsigned int size;
+    unsigned int nlink;
+};
+
+#define VIBE_NAME_MAX 63
+struct vibe_dirent {
+    unsigned int ino;
+    unsigned int type;
+    char name[VIBE_NAME_MAX + 1];   /* truncated, always NUL terminated */
+};
 
 struct vibe_info {
     unsigned int pid;

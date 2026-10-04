@@ -13,7 +13,10 @@
  * ========================================================================= */
 
 #define PROCS_MAX    16        /* Maximum number of concurrent processes */
-#define KERNEL_STACK 8192      /* Per-process kernel stack size          */
+#define KERNEL_STACK 32768     /* Per-process kernel stack (the Ring-0 shell and VFS
+                                * use large locals; 8 KiB overflowed and corrupted
+                                * the neighbouring process's stack) */
+#define STACK_CANARY 0xC0DEF00Du
 
 /* Process states */
 #define PROC_UNUSED   0
@@ -155,6 +158,18 @@ struct trap_frame {
  * Process Structure
  * ========================================================================= */
 
+/* Per-process file descriptor table entry. */
+#define OPEN_MAX 16
+#define FD_NONE    0
+#define FD_CONSOLE 1      /* kernel console (TTY): keyboard/serial in, VGA/serial out */
+#define FD_VFS     2      /* open file in the VFS */
+struct file;
+struct fdent {
+    uint8_t      type;    /* FD_* */
+    uint8_t      can_read, can_write;
+    struct file *file;    /* FD_VFS only */
+};
+
 struct process {
     int      pid;
     int      ppid;                 /* 0 = owned by the kernel */
@@ -169,6 +184,7 @@ struct process {
     uint32_t user_esp;             /* initial ESP (user procs) */
     void   (*kentry)(void);        /* entry point (kernel threads) */
     char     name[32];
+    struct fdent fds[OPEN_MAX];    /* fd 0/1/2 = console */
     /* Private kernel stack: TSS.esp0 points at its top while this process
      * runs. Holds the trap frame of the interrupted user context. */
     uint8_t  stack[KERNEL_STACK] __attribute__((aligned(16)));
@@ -309,6 +325,8 @@ struct process *process_create_user(const char *name, const void *image,
                                     size_t image_size, uint32_t arg);
 struct process *process_create_kthread(const char *name, void (*entry)(void));
 void      process_init(void);
+void      fd_init_std(struct process *p);      /* fds 0,1,2 -> console */
+void      fd_close_all(struct process *p);
 void      process_start(void) __attribute__((noreturn));
 void      process_exit(int code) __attribute__((noreturn));
 int       process_wait(struct process *p);      /* kernel-side wait + reap */
