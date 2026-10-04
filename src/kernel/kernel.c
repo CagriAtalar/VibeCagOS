@@ -29,7 +29,6 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "multiboot.h"
-#include "../fs/simplefs.h"
 #include "../fs/vfs.h"
 #include "../fs/vibefs.h"
 #include "../fs/procfs.h"

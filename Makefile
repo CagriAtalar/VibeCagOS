@@ -33,7 +33,6 @@ INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_
 # All object files
 OBJS := boot.o interrupts.o process.o syscall.o sysfile.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
-        simplefs.o \
         vibefs.o vfs.o procfs.o devfs.o \
         kmalloc.o klog.o pmm.o vmm.o \
         ethernet.o arp.o ipv4.o icmp.o udp.o dns.o \
@@ -98,7 +97,7 @@ userblob.o: $(KERNEL_DIR)/userblob.s utest.bin
 # Kernel C files
 kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
            $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/multiboot.h \
-           $(FS_DIR)/simplefs.h $(DRIVER_DIR)/vga.h $(DRIVER_DIR)/ide.h \
+           $(FS_DIR)/vibefs.h $(FS_DIR)/vfs.h $(DRIVER_DIR)/vga.h $(DRIVER_DIR)/ide.h \
            $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
            $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
@@ -132,8 +131,6 @@ gui.o: $(DRIVER_DIR)/gui.c $(DRIVER_DIR)/gui.h $(DRIVER_DIR)/mouse.h $(DRIVER_DI
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Filesystem
-simplefs.o: $(FS_DIR)/simplefs.c $(FS_DIR)/simplefs.h $(KERNEL_DIR)/common.h
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 vfs.o: $(FS_DIR)/vfs.c $(FS_DIR)/vfs.h $(KERNEL_DIR)/kmalloc.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
