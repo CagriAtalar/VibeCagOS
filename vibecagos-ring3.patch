@@ -1,0 +1,1361 @@
+From 85298241f2ca781cdd6c411f0c9da90656ad22c8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 3 Oct 2026 22:00:37 +0000
+Subject: [PATCH] Real ring 3 user processes: fix scheduler/context switch, add
+ validated syscalls
+
+Bugs fixed:
+- switch_context read its arguments from eax/edx, but i386 cdecl passes them
+  on the stack; it also had the fabricated stack frame in the wrong pop order.
+- user_entry used the *kernel* ESP as the user stack pointer and never mapped a
+  user stack.
+- USER_BASE (16 MiB) overlapped the kernel identity map; PDE U/S bit was not
+  set when a user page landed in an existing page table.
+- Nothing ever called create_process(); no user process could run.
+- A fault in ring 3 halted the whole machine (only #PF was survivable).
+- ISR stub left user data selectors loaded in kernel mode.
+- Syscalls dereferenced raw user pointers (kernel memory read/write primitive).
+- yield() could switch to a blocked idle task; per-process CR3 was never
+  restored for the idle/shell task; zombies leaked their address space.
+
+Added:
+- user/ runtime + linker script, built-in programs embedded via userprog.S
+- uaccess.c: user_range_ok()/user_strncpy(); vmm_check_user(),
+  vmm_destroy_address_space()
+- process_wait()/reaping, sleep/wake, user-mode-only timer preemption
+- shell: run <prog> [&], progs, usertest; make test-user
+---
+ Makefile                |  41 +++-
+ README.md               |  28 ++-
+ src/kernel/interrupts.s |  20 ++
+ src/kernel/kernel.c     | 455 +++++++++++++++++++++++++++++++---------
+ src/kernel/kernel.h     |  25 ++-
+ src/kernel/uaccess.c    |  50 +++++
+ src/kernel/uaccess.h    |  21 ++
+ src/kernel/userprog.S   |  26 +++
+ src/kernel/vmm.c        |  44 ++++
+ src/kernel/vmm.h        |   8 +
+ user/crash.c            |   9 +
+ user/hello.c            |  43 ++++
+ user/segv.c             |   9 +
+ user/spin.c             |  19 ++
+ user/ulib.h             |  47 +++++
+ user/upper.c            |  14 ++
+ user/user.ld            |  23 ++
+ 17 files changed, 776 insertions(+), 106 deletions(-)
+ create mode 100644 src/kernel/uaccess.c
+ create mode 100644 src/kernel/uaccess.h
+ create mode 100644 src/kernel/userprog.S
+ create mode 100644 user/crash.c
+ create mode 100644 user/hello.c
+ create mode 100644 user/segv.c
+ create mode 100644 user/spin.c
+ create mode 100644 user/ulib.h
+ create mode 100644 user/upper.c
+ create mode 100644 user/user.ld
+
+diff --git a/Makefile b/Makefile
+index 912305d..c7501d7 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test
++.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-user
+ 
+ # ============================================================
+ # VibeCagOS Build System
+@@ -31,7 +31,7 @@ NET_DIR    := src/net
+ INCLUDES := -Isrc -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
+ 
+ # All object files
+-OBJS := boot.o interrupts.o \
++OBJS := boot.o interrupts.o userprog.o uaccess.o \
+         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
+         simplefs.o \
+         vibefs.o vfs.o procfs.o devfs.o \
+@@ -53,11 +53,36 @@ QEMU_SMP := $(QEMU_COMMON) -smp 2
+ 
+ all: os.iso
+ 
++# ------------------------------------------------------------
++# User programs (ring 3 flat binaries, embedded into the kernel)
++# ------------------------------------------------------------
++USER_PROGS := hello spin crash segv upper
++USER_BINS  := $(addprefix user/,$(addsuffix .bin,$(USER_PROGS)))
++
++USER_CFLAGS := -std=c11 -O2 -Wall -Wextra -m32 -fuse-ld=lld -static \
++               -ffreestanding -nostdlib -fno-pie -no-pie \
++               -fno-stack-protector -mno-sse -mno-mmx \
++               -Isrc/kernel -Iuser -Wno-unused-command-line-argument
++
++user/%.elf: user/%.c user/ulib.h user/user.ld $(KERNEL_DIR)/common.h
++	$(CC) $(USER_CFLAGS) -Wl,-Tuser/user.ld -o $@ $<
++
++user/%.bin: user/%.elf
++	$(OBJCOPY) -O binary $< $@
++
++.PRECIOUS: user/%.elf
++
++userprog.o: $(KERNEL_DIR)/userprog.S $(USER_BINS)
++	$(AS) $(ASFLAGS) -c $< -o $@
++
++uaccess.o: $(KERNEL_DIR)/uaccess.c $(KERNEL_DIR)/uaccess.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/kernel.h
++	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
++
+ # Assembly
+ boot.o: $(KERNEL_DIR)/boot.s
+ 	$(AS) $(ASFLAGS) -c $< -o $@
+ 
+-interrupts.o: $(KERNEL_DIR)/interrupts.s
++interrupts.o: $(KERNEL_DIR)/interrupts.s $(KERNEL_DIR)/kernel.h
+ 	$(AS) $(ASFLAGS) -c $< -o $@
+ 
+ # Kernel C files
+@@ -67,7 +92,8 @@ kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
+            $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
+            $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
+            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
+-           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h
++           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h \
++           $(KERNEL_DIR)/uaccess.h
+ 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+ 
+ common.o: $(KERNEL_DIR)/common.c $(KERNEL_DIR)/common.h
+@@ -184,6 +210,11 @@ test: os.iso disk.img
+ 	@echo "Running QEMU integration test (serial output)..."
+ 	@printf '\nhelp\npwd\ndate\nfree\ndevices\npci\nls\necho VibeCagOS_Automated_Test_OK > /tmp/test.txt\ncat /tmp/test.txt\ncp /tmp/test.txt /tmp/copy.txt\nhead /tmp/copy.txt\nstat /tmp/copy.txt\ncat /proc/version\ncat /proc/meminfo\ncat /etc/version\ndmesg\nexit\n' | timeout 12 $(QEMU) $(QEMU_COMMON) -display none 2>&1
+ 
++# Ring 3 / scheduler / syscall-validation integration test
++test-user: os.iso disk.img
++	@echo "Running ring 3 integration test (serial output)..."
++	@printf '\nrun hello\nrun segv\nrun crash\nusertest\nps\nexit\n' | timeout 40 $(QEMU) $(QEMU_COMMON) -display none 2>&1
++
+ # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
+ debug: os.iso disk.img
+ 	@echo "Starting QEMU with GDB stub on port 1234..."
+@@ -204,7 +235,7 @@ symbols: kernel.elf
+ # ============================================================
+ 
+ clean:
+-	rm -f *.o *.elf *.map os.iso disk.img
++	rm -f *.o *.elf *.map os.iso disk.img user/*.elf user/*.bin
+ 	rm -rf isodir
+ 
+ help:
+diff --git a/README.md b/README.md
+index 2bf034c..9ec79ff 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@ VibeCagOS is a real operating system kernel that:
+ - Provides a **Virtual Filesystem (VFS)** layer abstracting storage devices and pseudo-filesystems
+ - Implements **VibeFS**, a hierarchical persistent disk filesystem with directories, subdirectories, inodes, and `.` / `..` traversal
+ - Mounts **procfs** at `/proc` offering dynamic kernel introspection (`/proc/version`, `/proc/uptime`, `/proc/meminfo`, `/proc/cpuinfo`)
+-- Has a **preemptive scheduler** driven by a 100 Hz PIT timer
++- Has a **preemptive scheduler** driven by a 100 Hz PIT timer, scheduling **real ring 3 user processes** (private address spaces, validated syscalls)
+ - Handles **CPU exceptions** with detailed register dumps
+ - Supports **PS/2 keyboard** and serial console simultaneously
+ - Has **paging enabled** with a kernel identity map
+@@ -68,6 +68,32 @@ gdb kernel.elf -ex 'target remote :1234' -ex 'break kernel_main' -ex 'continue'
+ 
+ ---
+ 
++## User Mode (Ring 3)
++
++User programs run in ring 3 with a private page directory. The kernel is
++identity-mapped but supervisor-only; user space lives at `0x40000000`:
++
++```
++0x40000000  program image (flat binary)      0x7FFFC000-0x80000000  user stack
++```
++
++- **Syscalls** use `int 0x80` (DPL 3 gate): `eax` = number, `ebx/ecx/edx` = args, result in `eax`.
++  Every pointer argument is validated (`src/kernel/uaccess.c`) before the kernel touches it.
++- **Preemption**: the PIT timer switches away from ring 3 code. Ticks that land while the kernel is
++  inside a syscall do not preempt (the kernel is not reentrant yet).
++- **Faults in ring 3** (#GP, #PF, ...) terminate only the offending process.
++- Programs live in `user/` (runtime in `user/ulib.h`, linker script `user/user.ld`), are built to flat
++  binaries and embedded into the kernel image by `src/kernel/userprog.S`.
++
++```
++progs            list built-in user programs
++run <prog> [&]   run a program in ring 3 (& = background)
++usertest         two CPU hogs; their output interleaves if preemption works
++make test-user   scripted ring 3 integration test under QEMU
++```
++
++---
++
+ ## Shell Commands
+ 
+ Once booted, you'll see the colored prompt `vcos:<cwd>$` (e.g. `vcos:/$ ` or `vcos:/home/user$ `). Available commands:
+diff --git a/src/kernel/interrupts.s b/src/kernel/interrupts.s
+index c504bbd..1611aaa 100644
+--- a/src/kernel/interrupts.s
++++ b/src/kernel/interrupts.s
+@@ -28,12 +28,32 @@ isr_common:
+      * NOTE: The pushed ESP is pre-PUSHA value, used as padding in trap_frame.
+      */
+     pusha
++    cld                         /* C code assumes DF=0 */
++
++    /* Save the interrupted context's data segments, then switch to kernel
++     * data segments. Without this the kernel would keep running with user
++     * selectors (0x23) after the first ring 3 -> ring 0 transition. */
++    pushl %ds
++    pushl %es
++    pushl %fs
++    pushl %gs
++    movw  $0x10, %ax            /* GDT_KERNEL_DATA */
++    movw  %ax, %ds
++    movw  %ax, %es
++    movw  %ax, %fs
++    movw  %ax, %gs
+ 
+     /* Pass pointer to trap_frame (the current stack pointer) */
+     pushl %esp
+     call  handle_interrupt
+     addl  $4, %esp
+ 
++    /* Restore the interrupted context's segments */
++    popl  %gs
++    popl  %fs
++    popl  %es
++    popl  %ds
++
+     /* Restore all general purpose registers */
+     popa
+ 
+diff --git a/src/kernel/kernel.c b/src/kernel/kernel.c
+index 3ff7029..e8de6f4 100644
+--- a/src/kernel/kernel.c
++++ b/src/kernel/kernel.c
+@@ -28,6 +28,7 @@
+ #include "klog.h"
+ #include "pmm.h"
+ #include "vmm.h"
++#include "uaccess.h"
+ #include "multiboot.h"
+ #include "../fs/simplefs.h"
+ #include "../fs/vfs.h"
+@@ -477,17 +478,28 @@ struct process *idle_proc    = NULL;
+ 
+ static int next_pid = 1;
+ 
+-/* Forward declaration */
++/*
++ * switch_context(prev_sp, next_sp)
++ *
++ * Saves callee-saved registers on the current kernel stack, stores ESP in
++ * *prev_sp, loads ESP from *next_sp and restores the other stack's registers.
++ *
++ * NOTE: i386 cdecl passes arguments on the stack, NOT in registers. The
++ * pointers therefore live at 4(%esp) and 8(%esp) on entry and must be loaded
++ * BEFORE we push anything.
++ */
+ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp);
+ 
+ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
+     __asm__ __volatile__(
++        "movl  4(%esp), %eax\n"   /* prev_sp */
++        "movl  8(%esp), %edx\n"   /* next_sp */
+         "pushl %ebp\n"
+         "pushl %ebx\n"
+         "pushl %esi\n"
+         "pushl %edi\n"
+-        "movl  %esp, (%eax)\n"  /* eax = prev_sp */
+-        "movl  (%edx), %esp\n"  /* edx = next_sp */
++        "movl  %esp, (%eax)\n"    /* save current stack */
++        "movl  (%edx), %esp\n"    /* switch to the other stack */
+         "popl  %edi\n"
+         "popl  %esi\n"
+         "popl  %ebx\n"
+@@ -496,48 +508,75 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp, uint32_t *next_sp)
+     );
+ }
+ 
+-void yield(void) {
+-    struct process *next = idle_proc;
+-    int start = current_proc ? current_proc->pid : 0;
+-
++/* Wake every sleeper whose deadline has passed. Safe to call from IRQ0. */
++static void wake_sleepers(void) {
++    uint32_t now = ticks;
+     for (int i = 0; i < PROCS_MAX; i++) {
+-        int idx = (start + i) % PROCS_MAX;
+-        struct process *p = &procs[idx];
+-        if (p->state == PROC_RUNNABLE && p != current_proc) {
+-            next = p;
+-            break;
+-        }
++        if (procs[i].state == PROC_SLEEPING && procs[i].sleep_until <= now)
++            procs[i].state = PROC_RUNNABLE;
++    }
++}
++
++/* Round-robin: first RUNNABLE process after the current slot, or NULL. */
++static struct process *pick_next(void) {
++    int start = (int)(current_proc - procs);
++    for (int i = 1; i <= PROCS_MAX; i++) {
++        struct process *p = &procs[(start + i) % PROCS_MAX];
++        if (p != current_proc && p->state == PROC_RUNNABLE)
++            return p;
+     }
++    return NULL;
++}
+ 
+-    if (next == current_proc)
+-        return;
++static bool other_runnable(void) {
++    wake_sleepers();
++    return pick_next() != NULL;
++}
+ 
++void yield(void) {
+     struct process *prev = current_proc;
++    struct process *next = pick_next();
++
++    if (!next) {
++        /* Nobody else wants the CPU. Keep running if we still can. */
++        if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE)
++            return;
++        /* We are blocked/sleeping/zombie: fall back to the idle/shell task. */
++        next = idle_proc;
++        if (next == prev)
++            return;
++    }
++
++    /* The switch must not be interrupted halfway. Remember each context's own
++     * IF so that it is restored when that context is resumed. */
++    uint32_t eflags;
++    __asm__ __volatile__("pushf\n\tpopl %0\n\tcli" : "=r"(eflags) : : "memory");
++
++    if (prev->state == PROC_RUNNING)
++        prev->state = PROC_RUNNABLE;
++    next->state  = PROC_RUNNING;
+     current_proc = next;
+ 
+     if (next->page_table)
+         load_cr3((uint32_t)next->page_table);
+ 
++    /* Ring 3 -> ring 0 transitions must land on THIS process's kernel stack */
+     tss_set_kernel_stack((uint32_t)&next->stack[KERNEL_STACK]);
+     switch_context(&prev->sp, &next->sp);
++
++    __asm__ __volatile__("pushl %0\n\tpopf" : : "r"(eflags) : "memory", "cc");
+ }
+ 
+ void schedule(void) {
+-    /* Check for sleeping processes that should wake up */
+-    uint32_t now = ticks;
+-    for (int i = 0; i < PROCS_MAX; i++) {
+-        if (procs[i].state == PROC_SLEEPING && procs[i].sleep_until <= now)
+-            procs[i].state = PROC_RUNNABLE;
+-    }
++    wake_sleepers();
+     yield();
+ }
+ 
+ void sleep_ms(uint32_t ms) {
+     if (!current_proc || current_proc == idle_proc)
+         return;
+-    uint32_t wake_tick = ticks + (ms / 10);  /* 100 Hz = 10 ms per tick */
+     current_proc->state       = PROC_SLEEPING;
+-    current_proc->sleep_until = wake_tick;
++    current_proc->sleep_until = ticks + (ms + 9) / 10;  /* 100 Hz = 10 ms per tick */
+     yield();
+ }
+ 
+@@ -554,89 +593,164 @@ static void idle_task(void) {
+ 
+ /* =========================================================================
+  * User Entry Point (for ring 3 processes)
++ *
++ * A freshly created process is first "switched to" like any other, so its
++ * first instruction runs in ring 0 on its own kernel stack. user_entry then
++ * builds an iret frame and drops to ring 3 at USER_BASE with a real user
++ * stack (USER_STACK) -- NOT the kernel stack.
+  * ========================================================================= */
+ 
+ __attribute__((naked)) void user_entry(void) {
+     __asm__ __volatile__(
+-        "mov $0x23, %%ax\n"      /* User data segment (GDT_USER_DATA | RPL_USER = 0x20|3 = 0x23) */
++        "mov $0x23, %%ax\n"      /* GDT_USER_DATA | RPL 3 */
+         "mov %%ax, %%ds\n"
+         "mov %%ax, %%es\n"
+         "mov %%ax, %%fs\n"
+         "mov %%ax, %%gs\n"
+-        "mov %%esp, %%eax\n"
+-        "pushl $0x23\n"          /* SS */
+-        "pushl %%eax\n"          /* ESP */
++        "pushl $0x23\n"          /* SS  */
++        "pushl %1\n"             /* ESP: top of the user stack */
+         "pushf\n"
+         "popl %%eax\n"
+-        "orl $0x200, %%eax\n"    /* Enable IF in EFLAGS */
+-        "pushl %%eax\n"
+-        "pushl $0x1B\n"          /* CS (GDT_USER_CODE | RPL_USER = 0x18|3 = 0x1B) */
++        "orl  $0x200, %%eax\n"   /* IF=1: user code must be interruptible */
++        "andl $0xFFFFCFFF, %%eax\n" /* IOPL=0: no direct port I/O from ring 3 */
++        "pushl %%eax\n"          /* EFLAGS */
++        "pushl $0x1B\n"          /* CS (GDT_USER_CODE | RPL 3) */
+         "pushl %0\n"             /* EIP */
+         "iret\n"
+-        : : "r"(USER_BASE)
++        : : "i"(USER_BASE), "i"(USER_STACK)
+     );
+ }
+ 
+ /* =========================================================================
+- * Create Process
++ * Process lifecycle: create / exit / wait / reap
+  * ========================================================================= */
+ 
++static bool has_waiter(struct process *p) {
++    for (int i = 0; i < PROCS_MAX; i++) {
++        if (procs[i].state == PROC_BLOCKED && procs[i].wait_target == p)
++            return true;
++    }
++    return false;
++}
++
++/* Release a zombie's address space and recycle its slot. */
++static void reap(struct process *p) {
++    if (p == current_proc || p == idle_proc || p->state != PROC_ZOMBIE)
++        return;
++    uint32_t *pd = p->page_table;
++    p->page_table = NULL;
++    p->state      = PROC_UNUSED;
++    vmm_destroy_address_space(pd);   /* pd is never the active CR3 here */
++}
++
++/* Reap zombies nobody is waiting for (e.g. background jobs). */
++static void reap_orphans(void) {
++    for (int i = 0; i < PROCS_MAX; i++) {
++        if (procs[i].state == PROC_ZOMBIE && !has_waiter(&procs[i]))
++            reap(&procs[i]);
++    }
++}
++
+ struct process *create_process(const void *image, size_t image_size, const char *name) {
+-    struct process *proc = NULL;
++    reap_orphans();
++
++    if (!image || image_size == 0 || image_size > USER_IMAGE_MAX)
++        return NULL;
+ 
++    struct process *proc = NULL;
+     for (int i = 0; i < PROCS_MAX; i++) {
+         if (procs[i].state == PROC_UNUSED) {
+             proc = &procs[i];
+             break;
+         }
+     }
+-
+     if (!proc)
+-        PANIC("No free process slots");
+-
+-    /* Set up kernel stack — switch_context will pop these */
+-    uint32_t *sp = (uint32_t *)&proc->stack[KERNEL_STACK];
+-    *--sp = 0;             /* edi */
+-    *--sp = 0;             /* esi */
+-    *--sp = 0;             /* ebx */
+-    *--sp = 0;             /* ebp */
+-    *--sp = (uint32_t)user_entry;  /* return address */
+-
+-    /* Create private page directory */
+-    uint32_t *pd = (uint32_t *)alloc_pages(1);
+-
+-    /* Identity-map kernel */
+-    for (paddr_t p = 0; p < (paddr_t)__free_ram_end; p += PAGE_SIZE)
+-        map_page(pd, p, p, PAGE_WRITE);
+-
+-    /* Map user image */
+-    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+-        paddr_t page  = alloc_pages(1);
+-        size_t  chunk = PAGE_SIZE <= (image_size - off) ? PAGE_SIZE : (image_size - off);
++        return NULL;
++
++    /* Private address space. Kernel page tables are SHARED with the kernel
++     * directory (supervisor-only), so this is cheap and stays coherent. */
++    uint32_t *pd = vmm_create_address_space();
++    if (!pd)
++        return NULL;
++
++    /* Program image at USER_BASE */
++    for (size_t off = 0; off < image_size; off += PAGE_SIZE) {
++        paddr_t page = pmm_alloc_frame();
++        if (!page) goto oom;
++        size_t chunk = (image_size - off < PAGE_SIZE) ? (image_size - off) : PAGE_SIZE;
+         memcpy((void *)page, (const uint8_t *)image + off, chunk);
+         map_page(pd, USER_BASE + off, page, PAGE_USER | PAGE_WRITE);
+     }
+ 
++    /* User stack, growing down from USER_STACK */
++    for (int i = 0; i < USER_STACK_PAGES; i++) {
++        paddr_t page = pmm_alloc_frame();
++        if (!page) goto oom;
++        map_page(pd, USER_STACK - (uint32_t)(i + 1) * PAGE_SIZE, page,
++                 PAGE_USER | PAGE_WRITE);
++    }
++
++    /* Kernel stack: switch_context will pop these, then `ret` into user_entry */
++    uint32_t *sp = (uint32_t *)&proc->stack[KERNEL_STACK];
++    *--sp = (uint32_t)user_entry;  /* return address */
++    *--sp = 0;                     /* ebp */
++    *--sp = 0;                     /* ebx */
++    *--sp = 0;                     /* esi */
++    *--sp = 0;                     /* edi */
++
+     proc->pid         = next_pid++;
+     proc->state       = PROC_RUNNABLE;
+     proc->sp          = (uint32_t)sp;
+     proc->page_table  = pd;
+     proc->exit_code   = 0;
+     proc->sleep_until = 0;
++    proc->wait_target = NULL;
+     strncpy(proc->name, name, sizeof(proc->name) - 1);
++    proc->name[sizeof(proc->name) - 1] = '\0';
+ 
+     return proc;
++
++oom:
++    vmm_destroy_address_space(pd);
++    return NULL;
+ }
+ 
+ void process_exit(int code) {
+-    if (current_proc) {
+-        current_proc->exit_code = code;
+-        current_proc->state     = PROC_ZOMBIE;
++    struct process *me = current_proc;
++    me->exit_code = code;
++    me->state     = PROC_ZOMBIE;
++
++    /* Wake a parent that is blocked in process_wait() on us */
++    for (int i = 0; i < PROCS_MAX; i++) {
++        if (procs[i].state == PROC_BLOCKED && procs[i].wait_target == me)
++            procs[i].state = PROC_RUNNABLE;
+     }
++
+     yield();
+     PANIC("unreachable after exit");
+ }
+ 
++int process_wait(struct process *child) {
++    struct process *me = current_proc;
++
++    while (child->state != PROC_ZOMBIE) {
++        me->wait_target = child;
++        me->state       = PROC_BLOCKED;
++        yield();
++        if (child->state != PROC_ZOMBIE && !other_runnable()) {
++            /* Nothing to run (child asleep?) -- wait for the next interrupt */
++            __asm__ __volatile__("sti\n\thlt" : : : "memory");
++        }
++    }
++
++    me->wait_target = NULL;
++    me->state       = PROC_RUNNING;
++
++    int code = child->exit_code;
++    reap(child);
++    return code;
++}
++
+ /* =========================================================================
+  * Kernel Panic
+  * ========================================================================= */
+@@ -743,6 +857,14 @@ static void handle_exception(struct trap_frame *f) {
+ 
+     const char *name = (f->int_no < 15) ? names[f->int_no] : "Unknown Exception";
+ 
++    /* A fault in ring 3 is the PROCESS's bug, not the kernel's: terminate it
++     * and keep the system alive. Only ring 0 faults are fatal. */
++    if ((f->cs & 3) == 3 && current_proc && current_proc != idle_proc) {
++        printf("\n[kernel] pid %d (%s) crashed: #%u %s at eip=0x%08x err=0x%x -- terminated\n",
++               current_proc->pid, current_proc->name, f->int_no, name, f->eip, f->err_code);
++        process_exit(-1);
++    }
++
+     cli();
+     vga_set_color(0x0C);
+     printf("\n\n==============================================\n");
+@@ -774,8 +896,23 @@ static void handle_exception(struct trap_frame *f) {
+     while (1) halt();
+ }
+ 
++#define SYSCALL_PATH_MAX 256
++#define SYSCALL_FAIL     ((uint32_t)-1)
++
++/*
++ * Syscall ABI (int 0x80):
++ *   eax = syscall number, ebx/ecx/edx = arguments
++ *   eax = return value on exit (-1 on error)
++ *
++ * Every pointer argument comes from ring 3 and is validated with
++ * user_range_ok()/user_strncpy() before the kernel touches it.
++ */
+ static void handle_syscall(struct trap_frame *f) {
+-    switch (f->eax) {
++    uint32_t nr = f->eax;
++    char kpath[SYSCALL_PATH_MAX];
++    f->eax = 0;
++
++    switch (nr) {
+         case SYS_PUTCHAR:
+             putchar((char)f->ebx);
+             break;
+@@ -785,66 +922,84 @@ static void handle_syscall(struct trap_frame *f) {
+                 if (ch < 0)
+                     ch = (int)serial_getchar();
+                 if (ch >= 0) {
+-                    f->ebx = (uint32_t)ch;
++                    f->eax = (uint32_t)ch;
+                     break;
+                 }
+-                yield();
++                if (other_runnable())
++                    yield();
++                else
++                    __asm__ __volatile__("sti\n\thlt\n\tcli" : : : "memory");
+             }
+             break;
+         case SYS_EXIT:
+             printf("[sys] process %d exited with code %d\n",
+                    current_proc ? current_proc->pid : 0, (int)f->ebx);
+-            if (current_proc) current_proc->state = PROC_ZOMBIE;
+-            yield();
++            process_exit((int)f->ebx);
+             break;
+         case SYS_READFILE: {
+-            const char *path = (const char *)f->ebx;
+             void *buf = (void *)f->ecx;
+             size_t len = (size_t)f->edx;
+-            struct file *file = vfs_open(path, FILE_READ, 0);
+-            if (!file) { f->eax = (uint32_t)-1; break; }
++            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
++                !user_range_ok(buf, len, true)) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            struct file *file = vfs_open(kpath, FILE_READ, 0);
++            if (!file) { f->eax = SYSCALL_FAIL; break; }
+             int n = vfs_read(file, buf, len);
+             vfs_close(file);
+             f->eax = (uint32_t)n;
+             break;
+         }
+         case SYS_WRITEFILE: {
+-            const char *path = (const char *)f->ebx;
+             const void *buf = (const void *)f->ecx;
+             size_t len = (size_t)f->edx;
+-            struct file *file = vfs_open(path, FILE_WRITE, VFS_PERM_DEFAULT_FILE);
+-            if (!file) { f->eax = (uint32_t)-1; break; }
++            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
++                !user_range_ok(buf, len, false)) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            struct file *file = vfs_open(kpath, FILE_WRITE, VFS_PERM_DEFAULT_FILE);
++            if (!file) { f->eax = SYSCALL_FAIL; break; }
+             int n = vfs_write(file, buf, len);
+             vfs_close(file);
+             f->eax = (uint32_t)n;
+             break;
+         }
+-        case SYS_LS: {
+-            const char *path = (const char *)f->ebx;
+-            vibefs_ls(path ? path : "/");
+-            f->eax = 0;
++        case SYS_LS:
++            if (f->ebx == 0) {
++                vibefs_ls("/");
++            } else if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
++                f->eax = SYSCALL_FAIL; break;
++            } else {
++                vibefs_ls(kpath);
++            }
+             break;
+-        }
+-        case SYS_MKDIR: {
+-            const char *path = (const char *)f->ebx;
+-            f->eax = (uint32_t)vfs_mkdir(path, VFS_PERM_DEFAULT_DIR);
++        case SYS_MKDIR:
++            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            f->eax = (uint32_t)vfs_mkdir(kpath, VFS_PERM_DEFAULT_DIR);
+             break;
+-        }
+-        case SYS_UNLINK: {
+-            const char *path = (const char *)f->ebx;
+-            f->eax = (uint32_t)vfs_unlink(path);
++        case SYS_UNLINK:
++            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            f->eax = (uint32_t)vfs_unlink(kpath);
+             break;
+-        }
+         case SYS_STAT: {
+-            const char *path = (const char *)f->ebx;
+             struct vstat *st = (struct vstat *)f->ecx;
+-            f->eax = (uint32_t)vfs_stat(path, st);
++            if (user_strncpy(kpath, (const char *)f->ebx, sizeof kpath) < 0 ||
++                !user_range_ok(st, sizeof *st, true)) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            f->eax = (uint32_t)vfs_stat(kpath, st);
+             break;
+         }
+         case SYS_TIME: {
+             struct rtc_time *t = (struct rtc_time *)f->ebx;
+-            if (t) rtc_get_time(t);
+-            f->eax = 0;
++            if (!user_range_ok(t, sizeof *t, true)) {
++                f->eax = SYSCALL_FAIL; break;
++            }
++            rtc_get_time(t);
+             break;
+         }
+         case SYS_GETPID:
+@@ -860,8 +1015,8 @@ static void handle_syscall(struct trap_frame *f) {
+             f->eax = get_uptime_ms();
+             break;
+         default:
+-            printf("[syscall] Unknown: %u (eip=0x%08x)\n", f->eax, f->eip);
+-            f->eax = (uint32_t)-1;
++            printf("[syscall] Unknown: %u (eip=0x%08x)\n", nr, f->eip);
++            f->eax = SYSCALL_FAIL;
+             break;
+     }
+ }
+@@ -884,10 +1039,13 @@ void handle_interrupt(struct trap_frame *f) {
+     if (n == 32) {
+         /* PIT Timer — IRQ0 */
+         ticks++;
+-        pic_eoi(0);
+-        /* Preempt: every tick, schedule */
+-        if (current_proc && current_proc != idle_proc)
+-            schedule();
++        pic_eoi(0);          /* EOI first: we may not come back through here soon */
++        wake_sleepers();
++        /* Preempt only code that was interrupted in ring 3. A tick that lands
++         * while the kernel is mid-syscall must not switch away: kernel data
++         * structures are not (yet) protected against reentrancy. */
++        if ((f->cs & 3) == 3 && current_proc && current_proc != idle_proc)
++            yield();
+         return;
+     }
+ 
+@@ -1096,6 +1254,10 @@ static void cmd_help(void) {
+     printf("  mv <src> <dst>   Rename/move file\n");
+     printf("  stat <path>      Show file information\n");
+     printf("  hexdump <file>   Hex dump file contents\n");
++    printf("--- Ring 3 programs ---\n");
++    printf("  progs            List built-in user programs\n");
++    printf("  run <p> [&]      Run program in user mode (& = background)\n");
++    printf("  usertest         Two CPU hogs: preemption demo\n");
+     printf("--- System ---\n");
+     printf("  uname            System information\n");
+     printf("  uptime           System uptime\n");
+@@ -1327,6 +1489,92 @@ static void cmd_ps(void) {
+     }
+ }
+ 
++/* --- Built-in ring 3 programs (embedded by userprog.S) ------------------- */
++
++extern const uint8_t user_hello_start[], user_hello_end[];
++extern const uint8_t user_spin_start[],  user_spin_end[];
++extern const uint8_t user_crash_start[], user_crash_end[];
++extern const uint8_t user_segv_start[],  user_segv_end[];
++extern const uint8_t user_upper_start[], user_upper_end[];
++
++struct user_prog {
++    const char    *name;
++    const char    *desc;
++    const uint8_t *start;
++    const uint8_t *end;
++};
++
++static const struct user_prog user_progs[] = {
++    { "hello", "syscalls + kernel pointer validation", user_hello_start, user_hello_end },
++    { "spin",  "CPU hog, never yields (preemption demo)", user_spin_start,  user_spin_end  },
++    { "crash", "executes cli in ring 3 (#GP)",           user_crash_start, user_crash_end },
++    { "segv",  "writes kernel memory (page fault)",      user_segv_start,  user_segv_end  },
++    { "upper", "blocking getchar: echoes a line in CAPS", user_upper_start, user_upper_end },
++};
++
++static const struct user_prog *find_user_prog(const char *name) {
++    for (size_t i = 0; i < ARRAY_SIZE(user_progs); i++) {
++        if (strcmp(user_progs[i].name, name) == 0)
++            return &user_progs[i];
++    }
++    return NULL;
++}
++
++static struct process *spawn_user(const char *name) {
++    const struct user_prog *prog = find_user_prog(name);
++    if (!prog) {
++        printf("run: no such program '%s' (try 'progs')\n", name);
++        return NULL;
++    }
++    struct process *p = create_process(prog->start, (size_t)(prog->end - prog->start), prog->name);
++    if (!p)
++        printf("run: cannot create process (out of slots or memory)\n");
++    return p;
++}
++
++static void cmd_progs(void) {
++    printf("Built-in ring 3 programs:\n");
++    for (size_t i = 0; i < ARRAY_SIZE(user_progs); i++)
++        printf("  %-6s %s (%u bytes)\n", user_progs[i].name, user_progs[i].desc,
++               (unsigned)(user_progs[i].end - user_progs[i].start));
++}
++
++/* run <prog> [&]  — start a program in ring 3; wait for it unless backgrounded */
++static void cmd_run(const char *args) {
++    while (*args == ' ') args++;
++
++    char name[32];
++    size_t n = 0;
++    while (args[n] && args[n] != ' ' && n < sizeof(name) - 1) { name[n] = args[n]; n++; }
++    name[n] = '\0';
++    if (n == 0) { printf("Usage: run <program> [&]   (see 'progs')\n"); return; }
++
++    bool background = (strchr(args + n, '&') != NULL);
++
++    struct process *p = spawn_user(name);
++    if (!p) return;
++
++    if (background) {
++        printf("[%d] %s started in background\n", p->pid, p->name);
++        return;
++    }
++    int pid = p->pid;
++    int code = process_wait(p);
++    printf("[%d] %s finished, exit code %d\n", pid, name, code);
++}
++
++/* usertest — two CPU hogs at once: output must interleave if preemption works */
++static void cmd_usertest(void) {
++    printf("Starting two 'spin' processes (they never call yield)...\n");
++    struct process *a = spawn_user("spin");
++    struct process *b = spawn_user("spin");
++    if (!a || !b) return;
++    int pa = a->pid, pb = b->pid;
++    int ca = process_wait(a);
++    int cb = process_wait(b);
++    printf("[usertest] pid %d exit %d, pid %d exit %d\n", pa, ca, pb, cb);
++}
++
+ static void cmd_ping(const char *ip_str) {
+     while (*ip_str == ' ') ip_str++;
+     if (*ip_str == '\0') {
+@@ -1815,6 +2063,8 @@ static void run_shell(void) {
+     char cwd_buf[VFS_PATH_MAX];
+ 
+     while (1) {
++        reap_orphans();   /* collect finished background jobs */
++
+         /* Show cwd in prompt */
+         vfs_get_cwd(cwd_buf, sizeof(cwd_buf));
+ 
+@@ -1968,6 +2218,14 @@ static void run_shell(void) {
+         } else if (strncmp(cmdline, "udplisten ", 10) == 0) {
+             cmd_udplisten(cmdline + 10);
+ 
++        /* --- Ring 3 programs --- */
++        } else if (strncmp(cmdline, "run ", 4) == 0) {
++            cmd_run(cmdline + 4);
++        } else if (strcmp(cmdline, "progs") == 0) {
++            cmd_progs();
++        } else if (strcmp(cmdline, "usertest") == 0) {
++            cmd_usertest();
++
+         } else if (strcmp(cmdline, "clear") == 0) {
+             vga_clear();
+         } else if (strcmp(cmdline, "exit") == 0) {
+@@ -2160,13 +2418,18 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
+     strncpy(idle_proc->name, "idle", sizeof(idle_proc->name) - 1);
+ 
+     uint32_t *sp = (uint32_t *)&idle_proc->stack[KERNEL_STACK];
+-    *--sp = 0;             /* edi */
+-    *--sp = 0;             /* esi */
+-    *--sp = 0;             /* ebx */
++    *--sp = (uint32_t)idle_task;   /* return address (popped last) */
+     *--sp = 0;             /* ebp */
+-    *--sp = (uint32_t)idle_task;
++    *--sp = 0;             /* ebx */
++    *--sp = 0;             /* esi */
++    *--sp = 0;             /* edi (popped first) */
+     idle_proc->sp = (uint32_t)sp;
+ 
++    /* The idle/shell task runs on the kernel directory so it never keeps a
++     * dead process's page directory loaded after a context switch. */
++    idle_proc->page_table = vmm_get_kernel_dir();
++    idle_proc->state      = PROC_RUNNING;
++
+     current_proc = idle_proc;
+     tss_set_kernel_stack((uint32_t)&idle_proc->stack[KERNEL_STACK]);
+ 
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index a961d0b..c7bff83 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -28,9 +28,22 @@
+ #define PAGE_WRITE   (1 << 1)
+ #define PAGE_USER    (1 << 2)
+ 
+-/* User space virtual base address */
+-#define USER_BASE    0x01000000u   /* 16 MiB */
+-#define USER_STACK   0x0FFFF000u   /* User stack top */
++/*
++ * User address space layout (per process, ring 3).
++ *
++ * The kernel is identity-mapped (supervisor only) from 0 up to __free_ram_end
++ * (~66 MiB). User space lives well above that so the two never overlap:
++ *
++ *   0x40000000  USER_BASE        program image (flat binary, linked here)
++ *   ...         (heap/bss follow the image)
++ *   0x7FFFC000  stack bottom     USER_STACK_PAGES pages, grows downward
++ *   0x80000000  USER_STACK       initial user ESP (exclusive top)
++ */
++#define USER_BASE        0x40000000u
++#define USER_LIMIT       0x80000000u   /* First address user code may NOT touch */
++#define USER_STACK       0x80000000u   /* Initial user ESP (top of stack)       */
++#define USER_STACK_PAGES 4
++#define USER_IMAGE_MAX   (1024u * 1024u)
+ 
+ /* =========================================================================
+  * GDT Segment Selectors
+@@ -113,7 +126,9 @@ struct tss {
+  * ========================================================================= */
+ 
+ struct trap_frame {
+-    /* Saved by our ISR stub (reverse push order) */
++    /* Segment registers saved by our ISR stub (pushed last, so lowest) */
++    uint32_t gs, fs, es, ds;
++    /* Saved by pusha (reverse push order) */
+     uint32_t edi, esi, ebp;
+     uint32_t esp_dummy;  /* Pushed by pusha — unusable */
+     uint32_t ebx, edx, ecx, eax;
+@@ -139,6 +154,7 @@ struct process {
+     uint32_t sp;                   /* Kernel stack pointer (when not running) */
+     uint32_t *page_table;          /* CR3 value — page directory */
+     uint32_t sleep_until;          /* Wake tick for PROC_SLEEPING */
++    struct process *wait_target;   /* Process this one is blocked waiting on */
+     int      exit_code;
+     char     name[32];
+     uint8_t  stack[KERNEL_STACK];  /* Per-process kernel stack */
+@@ -268,6 +284,7 @@ void      sleep_ms(uint32_t ms);
+ /* Process */
+ struct process *create_process(const void *image, size_t image_size, const char *name);
+ void      process_exit(int code);
++int       process_wait(struct process *child);   /* Blocks; returns exit code, reaps child */
+ 
+ /* Interrupt handlers (asm stubs) */
+ extern void isr0(void);   /* Divide by zero */
+diff --git a/src/kernel/uaccess.c b/src/kernel/uaccess.c
+new file mode 100644
+index 0000000..e36baa8
+--- /dev/null
++++ b/src/kernel/uaccess.c
+@@ -0,0 +1,50 @@
++/*
++ * VibeCagOS — User memory access helpers
++ */
++
++#include "uaccess.h"
++#include "kernel.h"
++#include "vmm.h"
++
++extern struct process *current_proc;
++
++bool user_range_ok(const void *ptr, size_t len, bool write) {
++    uint32_t start = (uint32_t)ptr;
++    uint32_t end   = start + (uint32_t)len;
++
++    if (!current_proc || !current_proc->page_table)
++        return false;
++    if (len == 0)
++        return true;
++    if (end < start)                          /* wrap-around */
++        return false;
++    if (start < USER_BASE || end > USER_LIMIT)
++        return false;
++
++    for (uint32_t page = start & ~(PAGE_SIZE - 1u); page < end; page += PAGE_SIZE) {
++        if (!vmm_check_user(current_proc->page_table, page, write))
++            return false;
++    }
++    return true;
++}
++
++int user_strncpy(char *dst, const char *usrc, size_t max) {
++    if (max == 0) return -1;
++
++    uint32_t addr = (uint32_t)usrc;
++    for (size_t i = 0; i < max; i++, addr++) {
++        /* Re-validate whenever we enter a new page */
++        if (i == 0 || (addr & (PAGE_SIZE - 1u)) == 0) {
++            if (addr < USER_BASE || addr >= USER_LIMIT ||
++                !current_proc || !current_proc->page_table ||
++                !vmm_check_user(current_proc->page_table, addr, false))
++                return -1;
++        }
++        char c = *(const char *)addr;
++        dst[i] = c;
++        if (c == '\0')
++            return (int)i;
++    }
++    dst[max - 1] = '\0';
++    return -1;                                /* too long */
++}
+diff --git a/src/kernel/uaccess.h b/src/kernel/uaccess.h
+new file mode 100644
+index 0000000..9b8dbb4
+--- /dev/null
++++ b/src/kernel/uaccess.h
+@@ -0,0 +1,21 @@
++#pragma once
++#include "common.h"
++
++/*
++ * VibeCagOS — User memory access helpers
++ *
++ * Syscall arguments that are pointers come from untrusted ring 3 code. The
++ * kernel shares the process's page directory, so it *could* dereference them
++ * directly — which is exactly the problem: a user could hand over a kernel
++ * address and make the kernel read or overwrite its own memory on their
++ * behalf. Every user pointer MUST go through these helpers first.
++ */
++
++/* True if [ptr, ptr+len) lies fully inside user space and every page is
++ * mapped user-accessible (and writable if write is true). len==0 is valid. */
++bool user_range_ok(const void *ptr, size_t len, bool write);
++
++/* Copy a NUL-terminated string from user space into dst (capacity max,
++ * including the NUL). Returns the string length, or -1 if the pointer is bad
++ * or the string does not fit. */
++int  user_strncpy(char *dst, const char *usrc, size_t max);
+diff --git a/src/kernel/userprog.S b/src/kernel/userprog.S
+new file mode 100644
+index 0000000..058640f
+--- /dev/null
++++ b/src/kernel/userprog.S
+@@ -0,0 +1,26 @@
++/*
++ * VibeCagOS — built-in user programs.
++ *
++ * Each flat binary produced by the user/ build is embedded into the kernel
++ * image with .incbin until a real ELF loader exists. The shell's `run`
++ * command copies one of these into a fresh ring 3 address space.
++ *
++ * Paths are relative to the repository root (where `make` runs).
++ */
++.section .rodata
++.align 16
++
++.macro UPROG name
++.global user_\name\()_start
++.global user_\name\()_end
++user_\name\()_start:
++    .incbin "user/\name\().bin"
++user_\name\()_end:
++    .align 16
++.endm
++
++UPROG hello
++UPROG spin
++UPROG crash
++UPROG segv
++UPROG upper
+diff --git a/src/kernel/vmm.c b/src/kernel/vmm.c
+index 2092b9c..fa1ee27 100644
+--- a/src/kernel/vmm.c
++++ b/src/kernel/vmm.c
+@@ -25,6 +25,12 @@ void vmm_map_page(uint32_t *pd, vaddr_t vaddr, paddr_t paddr, uint32_t flags) {
+         pd[pde_idx] = pt_paddr | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | (flags & VMM_FLAG_USER);
+     }
+ 
++    /* x86 checks U/S on BOTH the PDE and the PTE. If a user mapping lands in a
++     * page table that was first created for a supervisor-only mapping, the PDE
++     * must be upgraded or ring 3 will fault on a perfectly valid PTE. */
++    if (flags & VMM_FLAG_USER)
++        pd[pde_idx] |= VMM_FLAG_USER;
++
+     uint32_t *page_table = (uint32_t *)(pd[pde_idx] & ~0xFFFu);
+     page_table[pte_idx]  = (paddr & ~0xFFFu) | (flags & 0xFFFu) | VMM_FLAG_PRESENT;
+     vmm_invlpg(vaddr);
+@@ -100,6 +106,44 @@ uint32_t *vmm_create_address_space(void) {
+     return pd;
+ }
+ 
++bool vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write) {
++    uint32_t pde = pd[vaddr >> 22];
++    if (!(pde & VMM_FLAG_PRESENT) || !(pde & VMM_FLAG_USER))
++        return false;
++
++    uint32_t *page_table = (uint32_t *)(pde & ~0xFFFu);
++    uint32_t pte = page_table[(vaddr >> 12) & 0x3FF];
++    if (!(pte & VMM_FLAG_PRESENT) || !(pte & VMM_FLAG_USER))
++        return false;
++    if (write && !(pte & VMM_FLAG_WRITABLE))
++        return false;
++    return true;
++}
++
++/*
++ * Free everything a process owns in the user half of its address space
++ * (pages, page tables) and then the page directory itself.
++ *
++ * Kernel PDEs are shared with kernel_page_dir (same page tables), so only
++ * PDEs covering [USER_BASE, USER_LIMIT) are touched. Must NOT be called while
++ * pd is the active CR3.
++ */
++void vmm_destroy_address_space(uint32_t *pd) {
++    if (!pd || pd == kernel_page_dir) return;
++
++    for (uint32_t i = USER_BASE >> 22; i < (USER_LIMIT >> 22); i++) {
++        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
++        uint32_t *page_table = (uint32_t *)(pd[i] & ~0xFFFu);
++        for (int j = 0; j < 1024; j++) {
++            if (page_table[j] & VMM_FLAG_PRESENT)
++                pmm_free_frame(page_table[j] & ~0xFFFu);
++        }
++        pmm_free_frame((paddr_t)page_table);
++        pd[i] = 0;
++    }
++    pmm_free_frame((paddr_t)pd);
++}
++
+ void vmm_switch_dir(uint32_t *pd) {
+     load_cr3((uint32_t)pd);
+ }
+diff --git a/src/kernel/vmm.h b/src/kernel/vmm.h
+index 55dae0d..8abf842 100644
+--- a/src/kernel/vmm.h
++++ b/src/kernel/vmm.h
+@@ -47,6 +47,14 @@ void     dma_free(void *ptr, size_t size);
+ /* Switch active page directory (CR3) */
+ void     vmm_switch_dir(uint32_t *pd);
+ 
++/* True if vaddr is mapped user-accessible (PDE and PTE both have U/S set),
++ * and writable when write is true. Used to validate syscall pointers. */
++bool     vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write);
++
++/* Release the user half of an address space plus the page directory itself.
++ * pd must not be the active CR3. */
++void     vmm_destroy_address_space(uint32_t *pd);
++
+ /* Get kernel master page directory */
+ uint32_t *vmm_get_kernel_dir(void);
+ 
+diff --git a/user/crash.c b/user/crash.c
+new file mode 100644
+index 0000000..2ca30b6
+--- /dev/null
++++ b/user/crash.c
+@@ -0,0 +1,9 @@
++/* crash — executes a privileged instruction; the kernel must kill only us. */
++#include "ulib.h"
++
++int main(void) {
++    uputs("crash: executing 'cli' in ring 3...\n");
++    __asm__ __volatile__("cli");
++    uputs("crash: BUG, still alive after cli!\n");
++    return 0;
++}
+diff --git a/user/hello.c b/user/hello.c
+new file mode 100644
+index 0000000..e0c9ba5
+--- /dev/null
++++ b/user/hello.c
+@@ -0,0 +1,43 @@
++/* hello — exercises the basic syscalls and the kernel's pointer validation. */
++#include "ulib.h"
++
++static char buf[64];          /* lives in .bss: tests the .pad trick */
++
++int main(void) {
++    uputs("Hello from Ring 3! pid=");
++    uputint(sys_getpid());
++    uputs("\n");
++
++    /* 1. A kernel address must be REJECTED, not obeyed. */
++    int r = sys_readfile("/etc/version", (void *)0x00100000, 16);
++    uputs("read into kernel memory -> ");
++    uputint(r);
++    uputs(r == -1 ? "  (rejected, good)\n" : "  (BUG: accepted!)\n");
++
++    /* 2. A NULL path must be rejected too. */
++    r = sys_readfile((const char *)0, buf, sizeof buf);
++    uputs("read with NULL path     -> ");
++    uputint(r);
++    uputs(r == -1 ? "  (rejected, good)\n" : "  (BUG: accepted!)\n");
++
++    /* 3. File round trip through the VFS using only valid pointers. */
++    const char msg[] = "written from user space";
++    r = sys_writefile("/tmp/user.txt", msg, ustrlen(msg));
++    uputs("write /tmp/user.txt     -> ");
++    uputint(r);
++    uputs("\n");
++    r = sys_readfile("/tmp/user.txt", buf, sizeof buf - 1);
++    if (r >= 0) buf[r] = '\0';
++    uputs("read  /tmp/user.txt     -> ");
++    uputs(r >= 0 ? buf : "(failed)");
++    uputs("\n");
++
++    /* 4. Sleep and measure it with the kernel's tick counter. */
++    int t0 = sys_uptime_ms();
++    sys_sleep_ms(200);
++    uputs("slept ~");
++    uputint(sys_uptime_ms() - t0);
++    uputs(" ms (asked for 200)\n");
++
++    return 42;
++}
+diff --git a/user/segv.c b/user/segv.c
+new file mode 100644
+index 0000000..06893a1
+--- /dev/null
++++ b/user/segv.c
+@@ -0,0 +1,9 @@
++/* segv — writes to kernel memory; the MMU must stop us, the kernel must survive. */
++#include "ulib.h"
++
++int main(void) {
++    uputs("segv: writing to kernel address 0x00100000...\n");
++    *(volatile int *)0x00100000 = 0xDEAD;
++    uputs("segv: BUG, write to kernel memory succeeded!\n");
++    return 0;
++}
+diff --git a/user/spin.c b/user/spin.c
+new file mode 100644
+index 0000000..2847741
+--- /dev/null
++++ b/user/spin.c
+@@ -0,0 +1,19 @@
++/*
++ * spin — CPU-bound loop that NEVER calls yield().
++ * If two copies print interleaved lines, the timer interrupt is preempting
++ * ring 3 code and the scheduler is doing its job.
++ */
++#include "ulib.h"
++
++int main(void) {
++    int pid = sys_getpid();
++    for (int round = 1; round <= 6; round++) {
++        for (volatile unsigned i = 0; i < 4000000u; i++) { }
++        uputs("[spin pid ");
++        uputint(pid);
++        uputs("] round ");
++        uputint(round);
++        uputs("\n");
++    }
++    return 0;
++}
+diff --git a/user/ulib.h b/user/ulib.h
+new file mode 100644
+index 0000000..88f80ab
+--- /dev/null
++++ b/user/ulib.h
+@@ -0,0 +1,47 @@
++#pragma once
++/*
++ * VibeCagOS — minimal user-space runtime ("libc-lite").
++ *
++ * Syscall ABI (int 0x80): eax = number, ebx/ecx/edx = args, eax = result.
++ * Syscall numbers are shared with the kernel through common.h.
++ */
++#include "common.h"
++
++static inline int syscall3(int nr, int a, int b, int c) {
++    int ret;
++    __asm__ __volatile__("int $0x80"
++                         : "=a"(ret)
++                         : "a"(nr), "b"(a), "c"(b), "d"(c)
++                         : "memory");
++    return ret;
++}
++
++static inline void sys_putchar(char c)          { syscall3(SYS_PUTCHAR, c, 0, 0); }
++static inline int  sys_getchar(void)            { return syscall3(SYS_GETCHAR, 0, 0, 0); }
++static inline void sys_exit(int code)           { syscall3(SYS_EXIT, code, 0, 0); for (;;) {} }
++static inline int  sys_getpid(void)             { return syscall3(SYS_GETPID, 0, 0, 0); }
++static inline void sys_sleep_ms(int ms)         { syscall3(SYS_SLEEP, ms, 0, 0); }
++static inline void sys_yield(void)              { syscall3(SYS_YIELD, 0, 0, 0); }
++static inline int  sys_uptime_ms(void)          { return syscall3(SYS_UPTIME, 0, 0, 0); }
++static inline int  sys_readfile(const char *p, void *buf, int n)
++                                                { return syscall3(SYS_READFILE, (int)p, (int)buf, n); }
++static inline int  sys_writefile(const char *p, const void *buf, int n)
++                                                { return syscall3(SYS_WRITEFILE, (int)p, (int)buf, n); }
++
++static inline void uputs(const char *s) { while (*s) sys_putchar(*s++); }
++
++static inline void uputint(int v) {
++    char tmp[12];
++    int i = 0;
++    unsigned u = (v < 0) ? (unsigned)(-v) : (unsigned)v;
++    if (v < 0) sys_putchar('-');
++    do { tmp[i++] = (char)('0' + u % 10); u /= 10; } while (u);
++    while (i--) sys_putchar(tmp[i]);
++}
++
++static inline int ustrlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
++
++/* Entry point: every program defines main(); _start calls it and exits. */
++int main(void);
++__attribute__((section(".text._start"), noreturn, used))
++void _start(void) { sys_exit(main()); for (;;) {} }
+diff --git a/user/upper.c b/user/upper.c
+new file mode 100644
+index 0000000..5e142dc
+--- /dev/null
++++ b/user/upper.c
+@@ -0,0 +1,14 @@
++/* upper — reads one line with the blocking getchar syscall, echoes it in UPPERCASE. */
++#include "ulib.h"
++
++int main(void) {
++    uputs("upper> ");
++    for (;;) {
++        int c = sys_getchar();
++        if (c == '\n' || c == '\r') break;
++        if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
++        sys_putchar((char)c);
++    }
++    uputs("\n");
++    return 0;
++}
+diff --git a/user/user.ld b/user/user.ld
+new file mode 100644
+index 0000000..d7aa290
+--- /dev/null
++++ b/user/user.ld
+@@ -0,0 +1,23 @@
++/*
++ * VibeCagOS user program linker script.
++ *
++ * Programs are flat binaries loaded at USER_BASE (src/kernel/kernel.h).
++ * `_start` MUST be the first thing in .text: the kernel jumps to USER_BASE.
++ *
++ * .pad forces .bss into the on-disk image (objcopy -O binary only emits
++ * everything up to the last PROGBITS section), so the kernel's page-by-page
++ * copy also covers zero-initialised globals.
++ */
++ENTRY(_start)
++
++SECTIONS {
++    . = 0x40000000;
++
++    .text   : { *(.text._start) *(.text .text.*) }
++    .rodata : { *(.rodata .rodata.*) }
++    .data   : { *(.data .data.*) }
++    .bss    : { *(.bss .bss.* COMMON) }
++    .pad    : { BYTE(0) }
++
++    /DISCARD/ : { *(.interp) *(.comment) *(.note*) *(.eh_frame*) }
++}
+-- 
+2.43.0
+

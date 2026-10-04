@@ -13,27 +13,70 @@ extern char __kernel_base[], __free_ram_end[];
 
 static uint32_t *kernel_page_dir = NULL;
 
+static inline bool is_user_va(vaddr_t va) {
+    return va >= USER_BASE && va < USER_END;
+}
+
+/*
+ * Map one page. The USER bit is only honoured inside [USER_BASE, USER_END);
+ * kernel addresses can never become user-accessible, even by mistake.
+ * A page-directory entry gets USER|WRITABLE only for user-region slots
+ * (the real permission is decided per PTE).
+ */
 void vmm_map_page(uint32_t *pd, vaddr_t vaddr, paddr_t paddr, uint32_t flags) {
     uint32_t pde_idx = vaddr >> 22;
     uint32_t pte_idx = (vaddr >> 12) & 0x3FF;
+
+    if ((flags & VMM_FLAG_USER) && !is_user_va(vaddr)) {
+        KERROR("VMM", "refusing USER mapping of kernel address 0x%08x", vaddr);
+        flags &= ~VMM_FLAG_USER;
+    }
 
     if ((pd[pde_idx] & VMM_FLAG_PRESENT) == 0) {
         paddr_t pt_paddr = pmm_alloc_frame();
         if (!pt_paddr) {
             PANIC("VMM: Out of memory allocating page table for vaddr 0x%08x", vaddr);
         }
-        pd[pde_idx] = pt_paddr | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | (flags & VMM_FLAG_USER);
+        uint32_t pde_flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE;
+        if (is_user_va(vaddr)) pde_flags |= VMM_FLAG_USER;
+        pd[pde_idx] = pt_paddr | pde_flags;
     }
-
-    /* x86 checks U/S on BOTH the PDE and the PTE. If a user mapping lands in a
-     * page table that was first created for a supervisor-only mapping, the PDE
-     * must be upgraded or ring 3 will fault on a perfectly valid PTE. */
-    if (flags & VMM_FLAG_USER)
-        pd[pde_idx] |= VMM_FLAG_USER;
 
     uint32_t *page_table = (uint32_t *)(pd[pde_idx] & ~0xFFFu);
     page_table[pte_idx]  = (paddr & ~0xFFFu) | (flags & 0xFFFu) | VMM_FLAG_PRESENT;
     vmm_invlpg(vaddr);
+}
+
+/* Look up a user page. Succeeds only if the PDE and PTE are present and the
+ * PTE carries every bit in `need` (VMM_FLAG_USER [| VMM_FLAG_WRITABLE]).
+ * On success *out_paddr is the physical address of the byte at `vaddr`. */
+bool vmm_user_lookup(uint32_t *pd, vaddr_t vaddr, uint32_t need, paddr_t *out_paddr) {
+    if (!pd || !is_user_va(vaddr)) return false;
+    uint32_t pde = pd[vaddr >> 22];
+    if ((pde & (VMM_FLAG_PRESENT | VMM_FLAG_USER)) != (VMM_FLAG_PRESENT | VMM_FLAG_USER))
+        return false;
+    uint32_t *pt  = (uint32_t *)(pde & ~0xFFFu);
+    uint32_t  pte = pt[(vaddr >> 12) & 0x3FF];
+    need |= VMM_FLAG_PRESENT;
+    if ((pte & need) != need) return false;
+    if (out_paddr) *out_paddr = (pte & ~0xFFFu) | (vaddr & 0xFFFu);
+    return true;
+}
+
+/* Free every user page, user page table and the directory itself.
+ * Must not be called while `pd` is the active CR3. */
+void vmm_destroy_address_space(uint32_t *pd) {
+    if (!pd || pd == kernel_page_dir) return;
+    for (uint32_t i = USER_BASE >> 22; i < (USER_END >> 22); i++) {
+        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
+        uint32_t *pt = (uint32_t *)(pd[i] & ~0xFFFu);
+        for (int j = 0; j < 1024; j++) {
+            if (pt[j] & VMM_FLAG_PRESENT)
+                pmm_free_frame(pt[j] & ~0xFFFu);
+        }
+        pmm_free_frame((paddr_t)pt);
+    }
+    pmm_free_frame((paddr_t)pd);
 }
 
 void vmm_unmap_page(uint32_t *pd, vaddr_t vaddr) {
@@ -99,49 +142,13 @@ uint32_t *vmm_create_address_space(void) {
     if (!pd_paddr) return NULL;
     uint32_t *pd = (uint32_t *)pd_paddr;
 
-    /* Copy kernel space mappings from master page directory */
-    for (int i = 0; i < 1024; i++) {
-        pd[i] = kernel_page_dir[i];
+    /* Kernel slots: share the master page tables (supervisor-only).
+     * User slots: empty and private. */
+    for (uint32_t i = 0; i < 1024; i++) {
+        bool user_slot = (i >= (USER_BASE >> 22)) && (i < (USER_END >> 22));
+        pd[i] = user_slot ? 0 : kernel_page_dir[i];
     }
     return pd;
-}
-
-bool vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write) {
-    uint32_t pde = pd[vaddr >> 22];
-    if (!(pde & VMM_FLAG_PRESENT) || !(pde & VMM_FLAG_USER))
-        return false;
-
-    uint32_t *page_table = (uint32_t *)(pde & ~0xFFFu);
-    uint32_t pte = page_table[(vaddr >> 12) & 0x3FF];
-    if (!(pte & VMM_FLAG_PRESENT) || !(pte & VMM_FLAG_USER))
-        return false;
-    if (write && !(pte & VMM_FLAG_WRITABLE))
-        return false;
-    return true;
-}
-
-/*
- * Free everything a process owns in the user half of its address space
- * (pages, page tables) and then the page directory itself.
- *
- * Kernel PDEs are shared with kernel_page_dir (same page tables), so only
- * PDEs covering [USER_BASE, USER_LIMIT) are touched. Must NOT be called while
- * pd is the active CR3.
- */
-void vmm_destroy_address_space(uint32_t *pd) {
-    if (!pd || pd == kernel_page_dir) return;
-
-    for (uint32_t i = USER_BASE >> 22; i < (USER_LIMIT >> 22); i++) {
-        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
-        uint32_t *page_table = (uint32_t *)(pd[i] & ~0xFFFu);
-        for (int j = 0; j < 1024; j++) {
-            if (page_table[j] & VMM_FLAG_PRESENT)
-                pmm_free_frame(page_table[j] & ~0xFFFu);
-        }
-        pmm_free_frame((paddr_t)page_table);
-        pd[i] = 0;
-    }
-    pmm_free_frame((paddr_t)pd);
 }
 
 void vmm_switch_dir(uint32_t *pd) {
@@ -158,25 +165,24 @@ void vmm_page_fault_handler(struct trap_frame *f) {
 
     const char *cause = (err & 1) ? "protection violation" : "page not present";
     const char *action = (err & 2) ? "write" : "read";
-    const char *mode = (err & 4) ? "user" : "kernel";
+    bool from_user = TF_FROM_USER(f);
 
-    KERROR("VMM", "PAGE FAULT at 0x%08x [eip=0x%08x err=0x%x: %s on %s in %s mode]",
-           fault_addr, f->eip, err, action, cause, mode);
+    if (from_user) {
+        /* A user fault only kills the offending process. */
+        printf("[vmm] pid %d (%s): user page fault at 0x%08x (%s, %s) eip=0x%08x - killed\n",
+               current_proc ? current_proc->pid : -1,
+               current_proc ? current_proc->name : "?",
+               fault_addr, action, cause, f->eip);
+        KWARN("VMM", "user page fault at 0x%08x eip=0x%08x err=0x%x", fault_addr, f->eip, err);
+        process_exit(-14);   /* does not return */
+    }
 
-    printf("\n*** PAGE FAULT ***\n");
+    KERROR("VMM", "KERNEL PAGE FAULT at 0x%08x [eip=0x%08x err=0x%x]", fault_addr, f->eip, err);
+    printf("\n*** KERNEL PAGE FAULT ***\n");
     printf("  Faulting linear address : 0x%08x\n", fault_addr);
     printf("  Instruction pointer     : 0x%08x\n", f->eip);
-    printf("  Error code              : 0x%04x (%s on %s in %s mode)\n",
-           err, action, cause, mode);
-
-    if ((err & 4) != 0) {
-        /* User-mode fault */
-        printf("Terminating user process.\n");
-        process_exit(-1);
-    } else {
-        /* Kernel fault is fatal */
-        PANIC("Fatal kernel page fault at 0x%08x", fault_addr);
-    }
+    printf("  Error code              : 0x%04x (%s on %s)\n", err, action, cause);
+    PANIC("Fatal kernel page fault at 0x%08x", fault_addr);
 }
 
 void vmm_init(void) {
@@ -188,6 +194,8 @@ void vmm_init(void) {
 
     /* Identity map 0 through __free_ram_end */
     vaddr_t limit = (vaddr_t)__free_ram_end;
+    if (limit > USER_BASE)
+        PANIC("VMM: kernel image/RAM pool (0x%x) overlaps USER_BASE", limit);
     for (vaddr_t p = 0; p < limit; p += PAGE_SIZE) {
         vmm_map_page(kernel_page_dir, p, p, VMM_FLAG_WRITABLE);
     }
@@ -197,6 +205,12 @@ void vmm_init(void) {
 
     vmm_switch_dir(kernel_page_dir);
     enable_paging();
+
+    /* CR0.WP: make ring 0 honour read-only PTEs too. */
+    uint32_t cr0;
+    __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= (1u << 16);
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0));
 
     KINFO("VMM", "Paging enabled with 2-level page directory (identity-mapped to %x)", limit);
 }

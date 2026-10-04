@@ -50,20 +50,6 @@ typedef int32_t        intptr_t;
 /*
  * Syscall numbers
  */
-#define SYS_PUTCHAR   1
-#define SYS_GETCHAR   2
-#define SYS_EXIT      3
-#define SYS_READFILE  4
-#define SYS_WRITEFILE 5
-#define SYS_LS        6
-#define SYS_MKDIR     7
-#define SYS_UNLINK    8
-#define SYS_GETPID    9
-#define SYS_SLEEP     10
-#define SYS_YIELD     11
-#define SYS_UPTIME    12
-#define SYS_STAT      13
-#define SYS_TIME      14
 
 /*
  * Standard library functions (implemented in common.c)

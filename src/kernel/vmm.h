@@ -44,16 +44,15 @@ void    *dma_alloc(size_t size);
 /* Free DMA memory */
 void     dma_free(void *ptr, size_t size);
 
+/* Free all user pages/tables + the directory (not valid for the active CR3). */
+void     vmm_destroy_address_space(uint32_t *pd);
+
+/* User-page query: PDE+PTE present and PTE has all `need` bits
+ * (VMM_FLAG_USER, optionally | VMM_FLAG_WRITABLE). Fills *out_paddr. */
+bool     vmm_user_lookup(uint32_t *pd, vaddr_t vaddr, uint32_t need, paddr_t *out_paddr);
+
 /* Switch active page directory (CR3) */
 void     vmm_switch_dir(uint32_t *pd);
-
-/* True if vaddr is mapped user-accessible (PDE and PTE both have U/S set),
- * and writable when write is true. Used to validate syscall pointers. */
-bool     vmm_check_user(uint32_t *pd, vaddr_t vaddr, bool write);
-
-/* Release the user half of an address space plus the page directory itself.
- * pd must not be the active CR3. */
-void     vmm_destroy_address_space(uint32_t *pd);
 
 /* Get kernel master page directory */
 uint32_t *vmm_get_kernel_dir(void);

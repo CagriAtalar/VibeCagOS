@@ -22,6 +22,9 @@
 #define PROC_SLEEPING 3
 #define PROC_ZOMBIE   4
 #define PROC_BLOCKED  5
+#define PROC_CREATED  6        /* allocated, not yet runnable */
+
+#define TIME_SLICE_TICKS 3     /* round-robin quantum (100 Hz => 30 ms) */
 
 /* x86 Page table flags */
 #define PAGE_PRESENT (1 << 0)
@@ -29,21 +32,22 @@
 #define PAGE_USER    (1 << 2)
 
 /*
- * User address space layout (per process, ring 3).
+ * Virtual address space layout (32-bit, 2-level paging, no PAE):
  *
- * The kernel is identity-mapped (supervisor only) from 0 up to __free_ram_end
- * (~66 MiB). User space lives well above that so the two never overlap:
+ *   0x00000000 - __free_ram_end   kernel: identity mapped, supervisor-only,
+ *                                 page tables SHARED by every address space
+ *   0x10000000 (USER_BASE)        user image (text RO, data/bss RW)
+ *   0x1FFFC000 - 0x20000000       user stack (4 pages), grows down
+ *   up to USER_END (0xC0000000)   reserved for user (heap, mmap later)
+ *   0xC0000000 - 0xFFFFFFFF       kernel-only (MMIO such as the NIC / LFB)
  *
- *   0x40000000  USER_BASE        program image (flat binary, linked here)
- *   ...         (heap/bss follow the image)
- *   0x7FFFC000  stack bottom     USER_STACK_PAGES pages, grows downward
- *   0x80000000  USER_STACK       initial user ESP (exclusive top)
+ * User mappings live in page-directory slots >= 64, which are private per
+ * process; the kernel slots are copied from the master directory.
  */
-#define USER_BASE        0x40000000u
-#define USER_LIMIT       0x80000000u   /* First address user code may NOT touch */
-#define USER_STACK       0x80000000u   /* Initial user ESP (top of stack)       */
+#define USER_BASE        0x10000000u
+#define USER_STACK_TOP   0x20000000u   /* exclusive top of user stack */
 #define USER_STACK_PAGES 4
-#define USER_IMAGE_MAX   (1024u * 1024u)
+#define USER_END         0xC0000000u   /* first non-user address */
 
 /* =========================================================================
  * GDT Segment Selectors
@@ -126,23 +130,26 @@ struct tss {
  * ========================================================================= */
 
 struct trap_frame {
-    /* Segment registers saved by our ISR stub (pushed last, so lowest) */
+    /* Pushed by isr_common (lowest address first) */
     uint32_t gs, fs, es, ds;
-    /* Saved by pusha (reverse push order) */
     uint32_t edi, esi, ebp;
-    uint32_t esp_dummy;  /* Pushed by pusha — unusable */
+    uint32_t esp_dummy;  /* Pushed by pusha - unusable */
     uint32_t ebx, edx, ecx, eax;
-    /* Pushed by ISR stub */
+    /* Pushed by the per-vector stub */
     uint32_t int_no;
-    uint32_t err_code;
-    /* Pushed by CPU */
+    uint32_t err_code;   /* real (CPU) or dummy 0 */
+    /* Pushed by the CPU */
     uint32_t eip;
     uint32_t cs;
     uint32_t eflags;
-    /* Only present if privilege level change (ring3 -> ring0) */
+    /* ONLY present if the CPU changed privilege level (cs & 3 == 3).
+     * For ring0->ring0 traps these two words are not on the stack. */
     uint32_t user_esp;
     uint32_t user_ss;
 } __attribute__((packed));
+
+/* True if the trap interrupted user mode. */
+#define TF_FROM_USER(f) (((f)->cs & 3) == 3)
 
 /* =========================================================================
  * Process Structure
@@ -150,14 +157,21 @@ struct trap_frame {
 
 struct process {
     int      pid;
-    int      state;
-    uint32_t sp;                   /* Kernel stack pointer (when not running) */
-    uint32_t *page_table;          /* CR3 value — page directory */
+    int      ppid;                 /* 0 = owned by the kernel */
+    int      state;                /* PROC_* */
+    uint32_t sp;                   /* Saved kernel ESP while switched out */
+    uint32_t *page_table;          /* Page directory (phys). NULL => kernel thread */
     uint32_t sleep_until;          /* Wake tick for PROC_SLEEPING */
-    struct process *wait_target;   /* Process this one is blocked waiting on */
+    void    *wait_chan;            /* Channel for PROC_BLOCKED */
+    int      time_slice;           /* Ticks left in the quantum */
     int      exit_code;
+    uint32_t user_entry;           /* initial EIP (user procs) */
+    uint32_t user_esp;             /* initial ESP (user procs) */
+    void   (*kentry)(void);        /* entry point (kernel threads) */
     char     name[32];
-    uint8_t  stack[KERNEL_STACK];  /* Per-process kernel stack */
+    /* Private kernel stack: TSS.esp0 points at its top while this process
+     * runs. Holds the trap frame of the interrupted user context. */
+    uint8_t  stack[KERNEL_STACK] __attribute__((aligned(16)));
 };
 
 /* =========================================================================
@@ -265,6 +279,15 @@ paddr_t   alloc_pages(uint32_t n);
 void      free_pages(paddr_t paddr, uint32_t n);
 void      map_page(uint32_t *page_dir, uint32_t vaddr, paddr_t paddr, uint32_t flags);
 
+static inline uint32_t irq_save(void) {
+    uint32_t f;
+    __asm__ __volatile__("pushf; popl %0; cli" : "=r"(f) : : "memory");
+    return f;
+}
+static inline void irq_restore(uint32_t f) {
+    __asm__ __volatile__("pushl %0; popf" : : "r"(f) : "memory", "cc");
+}
+
 /* GDT / IDT */
 void      gdt_init(void);
 void      idt_init(void);
@@ -282,9 +305,23 @@ void      schedule(void);
 void      sleep_ms(uint32_t ms);
 
 /* Process */
-struct process *create_process(const void *image, size_t image_size, const char *name);
-void      process_exit(int code);
-int       process_wait(struct process *child);   /* Blocks; returns exit code, reaps child */
+struct process *process_create_user(const char *name, const void *image,
+                                    size_t image_size, uint32_t arg);
+struct process *process_create_kthread(const char *name, void (*entry)(void));
+void      process_init(void);
+void      process_start(void) __attribute__((noreturn));
+void      process_exit(int code) __attribute__((noreturn));
+int       process_wait(struct process *p);      /* kernel-side wait + reap */
+int       process_kill(int pid);
+void      block_on(void *chan);                 /* IF must be 0 */
+void      wakeup(void *chan);
+void      process_tick(struct trap_frame *f);   /* timer hook */
+extern struct process procs[];
+extern struct process *current_proc;
+extern struct process *idle_proc;
+extern void switch_context(uint32_t *old_sp, uint32_t new_sp);
+extern void trapret(void);
+extern const uint32_t isr_stub_table[48];
 
 /* Interrupt handlers (asm stubs) */
 extern void isr0(void);   /* Divide by zero */

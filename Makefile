@@ -1,4 +1,4 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-user
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-all
 
 # ============================================================
 # VibeCagOS Build System
@@ -8,7 +8,7 @@
 QEMU    := qemu-system-i386
 CC      := clang
 AS      := clang
-OBJCOPY := llvm-objcopy
+OBJCOPY := $(or $(shell command -v llvm-objcopy 2>/dev/null),objcopy)
 OBJDUMP := llvm-objdump
 
 # Compiler flags
@@ -28,10 +28,10 @@ FS_DIR     := src/fs
 NET_DIR    := src/net
 
 # Common include path
-INCLUDES := -Isrc -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
+INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o userprog.o uaccess.o \
+OBJS := boot.o interrupts.o process.o syscall.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         simplefs.o \
         vibefs.o vfs.o procfs.o devfs.o \
@@ -53,36 +53,43 @@ QEMU_SMP := $(QEMU_COMMON) -smp 2
 
 all: os.iso
 
-# ------------------------------------------------------------
-# User programs (ring 3 flat binaries, embedded into the kernel)
-# ------------------------------------------------------------
-USER_PROGS := hello spin crash segv upper
-USER_BINS  := $(addprefix user/,$(addsuffix .bin,$(USER_PROGS)))
-
-USER_CFLAGS := -std=c11 -O2 -Wall -Wextra -m32 -fuse-ld=lld -static \
-               -ffreestanding -nostdlib -fno-pie -no-pie \
-               -fno-stack-protector -mno-sse -mno-mmx \
-               -Isrc/kernel -Iuser -Wno-unused-command-line-argument
-
-user/%.elf: user/%.c user/ulib.h user/user.ld $(KERNEL_DIR)/common.h
-	$(CC) $(USER_CFLAGS) -Wl,-Tuser/user.ld -o $@ $<
-
-user/%.bin: user/%.elf
-	$(OBJCOPY) -O binary $< $@
-
-.PRECIOUS: user/%.elf
-
-userprog.o: $(KERNEL_DIR)/userprog.S $(USER_BINS)
-	$(AS) $(ASFLAGS) -c $< -o $@
-
-uaccess.o: $(KERNEL_DIR)/uaccess.c $(KERNEL_DIR)/uaccess.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/kernel.h
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
-
 # Assembly
 boot.o: $(KERNEL_DIR)/boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-interrupts.o: $(KERNEL_DIR)/interrupts.s $(KERNEL_DIR)/kernel.h
+interrupts.o: $(KERNEL_DIR)/interrupts.s
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+
+# ---- kernel pieces split out of kernel.c ----
+process.o: $(KERNEL_DIR)/process.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h src/abi/syscall.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+syscall.o: $(KERNEL_DIR)/syscall.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/usercopy.h src/abi/syscall.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+usercopy.o: $(KERNEL_DIR)/usercopy.c $(KERNEL_DIR)/usercopy.h $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# ---- user space: separate build products, flat binaries linked at USER_BASE ----
+USER_CFLAGS := -std=c11 -O1 -m32 -ffreestanding -nostdlib -fno-pie -no-pie \
+               -fno-stack-protector -fuse-ld=lld -static -Wall -Wextra -Isrc/abi \
+               -Wno-unused-command-line-argument
+
+user_crt0.o: src/user/crt0.s
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+utest.o: src/user/utest.c src/user/ulib.h src/abi/syscall.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+utest.elf: user_crt0.o utest.o src/user/user.ld
+	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,-Map=utest.map -o $@ user_crt0.o utest.o
+
+utest.bin: utest.elf
+	$(OBJCOPY) -O binary $< $@
+
+# Phase 1 of the plan: embed the user binary in the kernel image.
+userblob.o: $(KERNEL_DIR)/userblob.s utest.bin
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 # Kernel C files
@@ -92,8 +99,7 @@ kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
            $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
            $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
-           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h \
-           $(KERNEL_DIR)/uaccess.h
+           $(NET_DIR)/icmp.h $(NET_DIR)/udp.h $(NET_DIR)/dns.h $(NET_DIR)/netconfig.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 common.o: $(KERNEL_DIR)/common.c $(KERNEL_DIR)/common.h
@@ -210,10 +216,18 @@ test: os.iso disk.img
 	@echo "Running QEMU integration test (serial output)..."
 	@printf '\nhelp\npwd\ndate\nfree\ndevices\npci\nls\necho VibeCagOS_Automated_Test_OK > /tmp/test.txt\ncat /tmp/test.txt\ncp /tmp/test.txt /tmp/copy.txt\nhead /tmp/copy.txt\nstat /tmp/copy.txt\ncat /proc/version\ncat /proc/meminfo\ncat /etc/version\ndmesg\nexit\n' | timeout 12 $(QEMU) $(QEMU_COMMON) -display none 2>&1
 
-# Ring 3 / scheduler / syscall-validation integration test
-test-user: os.iso disk.img
-	@echo "Running ring 3 integration test (serial output)..."
-	@printf '\nrun hello\nrun segv\nrun crash\nusertest\nps\nexit\n' | timeout 40 $(QEMU) $(QEMU_COMMON) -display none 2>&1
+# ---- automated Ring-3 tests (serial output is checked by tests/run.sh) ----
+test-ring3: os.iso disk.img
+	@tests/run.sh ring3
+test-syscall: os.iso disk.img
+	@tests/run.sh syscall
+test-scheduler: os.iso disk.img
+	@tests/run.sh scheduler
+test-usercopy: os.iso disk.img
+	@tests/run.sh usercopy
+test-faults: os.iso disk.img
+	@tests/run.sh faults
+test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img
@@ -235,7 +249,7 @@ symbols: kernel.elf
 # ============================================================
 
 clean:
-	rm -f *.o *.elf *.map os.iso disk.img user/*.elf user/*.bin
+	rm -f *.o *.elf *.map *.bin os.iso disk.img
 	rm -rf isodir
 
 help:
