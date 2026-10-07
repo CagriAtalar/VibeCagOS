@@ -14,6 +14,7 @@ PROG(ls)
 PROG(cat)
 PROG(echo)
 PROG(utest)
+PROG(init)
 
 const struct user_prog user_progs[] = {
     { "sh",    prog_sh_start,    prog_sh_end    },
@@ -21,6 +22,7 @@ const struct user_prog user_progs[] = {
     { "cat",   prog_cat_start,   prog_cat_end   },
     { "echo",  prog_echo_start,  prog_echo_end  },
     { "utest", prog_utest_start, prog_utest_end },
+    { "init",  prog_init_start,  prog_init_end  },
 };
 const int user_prog_count = sizeof(user_progs) / sizeof(user_progs[0]);
 

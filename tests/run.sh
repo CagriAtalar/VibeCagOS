@@ -19,7 +19,8 @@ case $SUITE in
   usercopy)  CMDS="utest 7@ps" ;;
   stdio)     CMDS="utest 13@utest 14<abc@utest 16@utest 16@ps" ;;
   shell)     CMDS="pwd@mkdir /a@cd /a@pwd@echo hi there > f.txt@cat f.txt@cp f.txt g.txt@ls@mv g.txt h.txt@stat h.txt@head h.txt@cd ..@rm /a/f.txt@rm /a/h.txt@rmdir /a@ls@uname@ps@cat /proc/meminfo@nosuch@kill 9999@ls /nonexistent@cd /nonexistent@write w.txt hello world@cat w.txt@echo more >> w.txt@cat w.txt@hexdump w.txt@rm w.txt@utest 19@pwd@date@devices" ;;
-  proc)      CMDS="free@utest 17 &@ps@kill 3@ps@wait@utest 18@utest 20@ps@kill 8@sleep 300@ps@free" ;;
+  # Pids: 0 idle, 1 kinit (kernel), 2 init (Ring 3), 3 sh; first spawn is pid 4.
+  proc)      CMDS="free@utest 17 &@ps@kill 4@ps@wait@utest 18@utest 20@ps@kill 9@sleep 300@ps@free" ;;
   fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
   pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
@@ -118,11 +119,11 @@ case $SUITE in
   expect 'Detected Devices'                'devices'
   reject 'PANIC|EXCEPTION|killed'          'no panic / no kill' ;;
  proc)
-  expect '\[pid 3\] started'               'background spawn gets pid 3'
+  expect '\[pid 4\] started'               'background spawn gets pid 4 (0 idle, 1 kinit, 2 init, 3 sh)'
   expect 'SLEEPING  utest'                 'ps shows sleeping child'
-  expect 'kill: terminated pid 3'          'kill'
+  expect 'kill: terminated pid 4'          'kill'
   expect 'ZOMBIE    utest'                 'killed child is a zombie until reaped'
-  expect '\[pid 3\] exit code -9'          'wait reaps it with status -9'
+  expect '\[pid 4\] exit code -9'          'wait reaps it with status -9'
   expect 'T18: spawned=1'                  'Ring 3 spawn x2'
   expect 'T18: wait1=1 st1=42 wait2=1 st2=0' 'waitpid(pid) and waitpid(-1) return child status'
   expect 'T18: no_more_children=-10'      'waitpid with no children -> ECHILD'
@@ -131,7 +132,7 @@ case $SUITE in
   expect 'T18: wait_badptr=-14'            'waitpid bad pointer -> EFAULT'
   expect '\[pid [0-9]+\] exit code 7'      'parent exit code'
   expect 'T20: child_spawned=1'            'orphan scenario: parent exits first'
-  expect 'kill: terminated pid 8'          'orphaned child (ppid -1) can be killed'
+  expect 'kill: terminated pid 9'          'orphaned child (ppid -1) can be killed'
   nframes=$(grep -a '^FramesFree' "$LOG" | awk '{print $2}' | sort -u | wc -l)
   if [ "$nframes" = 1 ]; then echo "  PASS  no frame leak (FramesFree identical before/after)"; else echo "  FAIL  frame leak: $(grep -a '^FramesFree' "$LOG" | tr '\n' ' ')"; FAIL=1; fi
   reject 'PANIC|EXCEPTION'                 'no panic' ;;

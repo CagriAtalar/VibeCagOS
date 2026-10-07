@@ -23,3 +23,4 @@ EMBED ls
 EMBED cat
 EMBED echo
 EMBED utest
+EMBED init

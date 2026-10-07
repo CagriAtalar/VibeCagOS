@@ -1550,20 +1550,21 @@ static void cmd_gui(void) {
 
 
 /*
- * Install the built-in ELF images into /bin so programs exist as real files.
- *
- * Phase 2 of the migration: spawn("utest") still finds the embedded copy, but
- * "/bin/utest" and "exec /bin/utest" read the file through the VFS, which is
- * the path the filesystem will use once the binaries live on disk only. Only
- * missing files are written, so a user's own /bin/utest survives a reboot.
+ * Install the built-in ELF images as real files so the filesystem is the
+ * authoritative source of programs: /sbin/init for the first user process,
+ * /bin/<name> for everything else. Only missing files are written, so a
+ * user's own /bin/utest survives a reboot (and deleting one from the disk
+ * brings it back on the next boot — documented staging, see the audit).
  */
 static void install_user_programs(void) {
     vfs_mkdir("/bin", VFS_PERM_DEFAULT_DIR);
+    vfs_mkdir("/sbin", VFS_PERM_DEFAULT_DIR);
     for (int i = 0; i < user_prog_count; i++) {
         const struct user_prog *p = &user_progs[i];
+        const char *dir = (strcmp(p->name, "init") == 0) ? "/sbin/" : "/bin/";
         char path[64];
         int n = 0;
-        path[n++] = '/'; path[n++] = 'b'; path[n++] = 'i'; path[n++] = 'n'; path[n++] = '/';
+        for (const char *s = dir; *s && n < (int)sizeof(path) - 1; s++) path[n++] = *s;
         for (const char *s = p->name; *s && n < (int)sizeof(path) - 1; s++) path[n++] = *s;
         path[n] = '\0';
 
@@ -1883,17 +1884,24 @@ static void kshell_main(void) {
 #else
 /*
  * kinit (kernel thread, pid 1): the kernel's only job at boot is to start
- * the first user process. The shell is an ordinary Ring-3 program ("sh");
- * when it exits there is nothing left to run, so the machine powers off.
+ * the first user process. That is /sbin/init from the filesystem — a Ring-3
+ * program that starts the shell and waits for it. The embedded copy is only
+ * a fallback so a blank disk still boots. When init exits there is nothing
+ * left to run, so the machine powers off.
  */
 static void kinit_main(void) {
-    const struct user_prog *sh = user_prog_find("sh");
-    if (!sh) PANIC("no 'sh' program embedded");
-    const char *av[1] = { "sh" };
-    struct process *p = process_create_user("sh", sh->start, (size_t)(sh->end - sh->start), 1, av);
-    if (!p) PANIC("cannot start the user shell");
+    const char *av[1] = { "init" };
+    struct process *p = kernel_spawn_path("/sbin/init", "init", 1, av);
+    if (!p) {
+        KWARN("INIT", "/sbin/init missing, falling back to embedded sh");
+        const struct user_prog *sh = user_prog_find("sh");
+        if (!sh) PANIC("no 'sh' program embedded");
+        const char *shav[1] = { "sh" };
+        p = process_create_user("sh", sh->start, (size_t)(sh->end - sh->start), 1, shav);
+    }
+    if (!p) PANIC("cannot start the first user process");
     int code = process_wait(p);
-    KINFO("INIT", "sh exited with %d", code);
+    KINFO("INIT", "init exited with %d", code);
     power_off();
 }
 #endif
@@ -2009,7 +2017,7 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
 
             /* Create standard directory tree if not exists */
             static const char *stdirs[] = {
-                "/bin", "/etc", "/home", "/home/user",
+                "/bin", "/sbin", "/etc", "/home", "/home/user",
                 "/tmp", "/var", "/var/log",
                 "/usr", "/usr/bin", "/usr/lib",
                 "/dev", "/proc", "/sys", "/mnt",

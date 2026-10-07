@@ -45,8 +45,31 @@ int sys_spawnfds(const char *uname, const char *const *uargv, const int map[3]);
  * first one has left this function and entered Ring 3). */
 static uint8_t exec_image[EXEC_MAX_IMAGE];
 
-/* Resolve a program name: absolute/relative paths go through the VFS, bare
- * names are looked up in the built-in table. Returns the image and its size,
+/* Read an absolute VFS path into the scratch buffer. Returns the image and
+ * its size, or a negative errno. The caller keeps running on failure. */
+static int load_vfs_file(const char *path, const uint8_t **out, uint32_t *out_size) {
+    struct vstat st;
+    int r = vfs_stat(path, &st);
+    if (r < 0) return vfs_err(r);
+    if (st.type == VFS_TYPE_DIR) return -E_ISDIR;
+    if (st.size == 0 || st.size > sizeof(exec_image)) return -E_NOMEM;
+
+    struct file *f = vfs_open(path, FILE_READ, 0);
+    if (!f) return -E_NOENT;
+    int n = vfs_read(f, exec_image, st.size);
+    vfs_close(f);
+    if (n < 0) return vfs_err(n);
+    if ((uint32_t)n != st.size) return -E_IO;
+
+    *out = exec_image;
+    *out_size = (uint32_t)n;
+    return 0;
+}
+
+/* Resolve a program name. Paths containing '/' go through the VFS against the
+ * caller's cwd. Bare names try /bin/<name> on the disk first and fall back to
+ * the embedded table, so the filesystem is authoritative but a deleted /bin
+ * entry still boots from the built-in copy. Returns the image and its size,
  * or a negative errno. */
 static int load_image(const char *name, const uint8_t **out, uint32_t *out_size) {
     if (strchr(name, '/')) {
@@ -54,30 +77,46 @@ static int load_image(const char *name, const uint8_t **out, uint32_t *out_size)
         int r = path_resolve(current_proc->cwd[0] ? current_proc->cwd : "/",
                              name, path, sizeof(path));
         if (r < 0) return r;
-
-        struct vstat st;
-        r = vfs_stat(path, &st);
-        if (r < 0) return vfs_err(r);
-        if (st.type == VFS_TYPE_DIR) return -E_ISDIR;
-        if (st.size == 0 || st.size > sizeof(exec_image)) return -E_NOMEM;
-
-        struct file *f = vfs_open(path, FILE_READ, 0);
-        if (!f) return -E_NOENT;
-        int n = vfs_read(f, exec_image, st.size);
-        vfs_close(f);
-        if (n < 0) return vfs_err(n);
-        if ((uint32_t)n != st.size) return -E_IO;
-
-        *out = exec_image;
-        *out_size = (uint32_t)n;
-        return 0;
+        return load_vfs_file(path, out, out_size);
     }
+
+    /* Bare name: disk first, embedded fallback. stat first so a corrupt /bin
+     * file reports its own error instead of silently running stale bytes. */
+    char binpath[64];
+    int n = 0;
+    const char *prefix = "/bin/";
+    for (const char *s = prefix; *s && n < (int)sizeof(binpath) - 1; s++) binpath[n++] = *s;
+    for (const char *s = name; *s && n < (int)sizeof(binpath) - 1; s++) binpath[n++] = *s;
+    binpath[n] = '\0';
+    struct vstat st;
+    if (vfs_stat(binpath, &st) == 0 && st.size > 0)
+        return load_vfs_file(binpath, out, out_size);
 
     const struct user_prog *prog = user_prog_find(name);
     if (!prog) return -E_NOENT;
     *out      = prog->start;
     *out_size = (uint32_t)(prog->end - prog->start);
     return 0;
+}
+
+/*
+ * kernel_spawn_path - create a user process from the kernel side (no
+ * user pointers involved). Used by kinit to start /sbin/init from the
+ * filesystem: the child's ppid is the caller and its cwd is "/".
+ * Returns the child, or NULL on failure.
+ */
+struct process *kernel_spawn_path(const char *path, const char *name,
+                                  int argc, const char *const *argv) {
+    const uint8_t *image;
+    uint32_t size;
+    if (load_vfs_file(path, &image, &size) < 0) return NULL;
+    struct process *c = process_create_user(name, image, size, argc, argv);
+    if (!c) return NULL;
+    uint32_t fl = irq_save();
+    c->ppid = current_proc ? current_proc->pid : 0;
+    strcpy(c->cwd, "/");
+    irq_restore(fl);
+    return c;
 }
 
 /* Copy the caller's argv[] (NULL-terminated array of user strings) into the
@@ -124,7 +163,10 @@ int sys_spawnfds(const char *uname, const char *const *uargv,
     r = load_image(name, &image, &size);
     if (r < 0) return r;
 
-    struct process *c = process_create_user(name, image, size, argc, argp);
+    /* ps shows the basename: "/bin/sh" runs as "sh". */
+    const char *base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    struct process *c = process_create_user(base, image, size, argc, argp);
     if (!c) return -E_NOMEM;
     uint32_t fl = irq_save();
     c->ppid = current_proc->pid;

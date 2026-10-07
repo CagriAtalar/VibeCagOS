@@ -64,6 +64,7 @@ int    strncmp(const char *s1, const char *s2, int n);
 size_t strlen(const char *s);
 char  *strcat(char *dst, const char *src);
 char  *strchr(const char *s, int c);
+char  *strrchr(const char *s, int c);
 
 /* Formatted output (kernel printf — outputs via putchar()) */
 void printf(const char *fmt, ...);

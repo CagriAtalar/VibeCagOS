@@ -1,10 +1,11 @@
 .PHONY: all clean run run-window run-gdb debug image disk help run-smp test \
         test-ring3 test-syscall test-scheduler test-usercopy test-faults \
-        test-stdio test-fs test-shell test-pipe test-proc test-exec test-all
+        test-stdio test-fs test-shell test-pipe test-proc test-exec test-all \
+        check-boundary
 
 # ============================================================
 # VibeCagOS Build System
-# Version 0.3.0
+# Version 0.5.0
 # ============================================================
 
 QEMU    := qemu-system-i386
@@ -58,7 +59,18 @@ QEMU_SMP := $(QEMU_COMMON) -smp 2
 # Targets
 # ============================================================
 
-all: os.iso
+all: check-boundary os.iso
+
+# The user/kernel header boundary (§68 of the plan): user programs may include
+# only src/abi/syscall.h and their own headers. Anything reaching for kernel.h,
+# common.h, vmm.h, pmm.h, vfs.h or a driver header fails the build here instead
+# of silently coupling userland to kernel internals.
+check-boundary:
+	@if grep -rEn '#include.*"(kernel\.h|common\.h|vmm\.h|pmm\.h|vfs\.h|kmalloc\.h|klog\.h|drivers/)' src/user/; then \
+		echo "ERROR: src/user reaches into kernel headers (see above)"; exit 1; \
+	else \
+		echo "user/kernel header boundary OK"; \
+	fi
 
 # Assembly
 boot.o: $(KERNEL_DIR)/boot.s
@@ -108,8 +120,9 @@ user_crt0.o: src/user/crt0.s
 
 # Every user program = crt0 + its own .c + the tiny user library (ulib.c).
 # sh is the shell; ls/cat/echo are ordinary utilities that the shell spawns
-# instead of implementing them as builtins (milestone 14).
-USER_PROGS := sh ls cat echo utest
+# instead of implementing them as builtins (milestone 14); init is the first
+# user process and starts the shell (PID 1's child, Ring 3).
+USER_PROGS := sh ls cat echo utest init
 USER_LIB_OBJS := user_crt0.o user_ulib.o
 
 user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h

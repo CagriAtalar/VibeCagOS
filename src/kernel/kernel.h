@@ -329,6 +329,10 @@ void      sleep_ms(uint32_t ms);
 /* Process */
 struct process *process_create_user(const char *name, const void *image,
                                     size_t image_size, int argc, const char *const *argv);
+/* Kernel-side spawn from an absolute VFS path (exec.c). No user pointers;
+ * used by kinit so the first user process comes from the filesystem. */
+struct process *kernel_spawn_path(const char *path, const char *name,
+                                  int argc, const char *const *argv);
 int       process_waitpid(int pid, int *status);   /* current process waits for a child */
 struct user_prog { const char *name; const uint8_t *start, *end; };
 const struct user_prog *user_prog_find(const char *name);
