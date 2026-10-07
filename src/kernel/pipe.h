@@ -53,6 +53,12 @@ struct pipe *pipe_alloc(void);
 void pipe_close_read(struct pipe *p);
 void pipe_close_write(struct pipe *p);
 
+/* Take an extra reference on one end. Used when a child inherits a pipe fd
+ * across spawn(): without this the parent's close would drop the count to zero
+ * and free the pipe while the child is still using it. */
+void pipe_dup_read(struct pipe *p);
+void pipe_dup_write(struct pipe *p);
+
 /* Transfer bytes. Both may block (see the contract above) and are the only
  * places where a process can sleep on a pipe. */
 int pipe_read(struct pipe *p, char *dst, uint32_t n);

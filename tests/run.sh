@@ -10,18 +10,20 @@ dd if=/dev/zero of="$IMG" bs=1M count=2 status=none
 trap '' PIPE   # QEMU may exit while we still write: never die of SIGPIPE
 trap 'rm -f "$IMG" "$LOG"' EXIT
 
+# Commands are separated by '@' (not '|', which the shell itself uses for
+# pipelines). Spaces become '~' so word splitting does not split a command.
 case $SUITE in
-  ring3)     CMDS="utest 0|utest 12|ps" ;;
-  syscall)   CMDS="utest 1|utest 2|utest 6" ;;
-  scheduler) CMDS="utest 4 &|utest 5 &|wait|utest 4 &|utest 6|wait|ps" ;;
-  usercopy)  CMDS="utest 7|ps" ;;
-  stdio)     CMDS="utest 13|utest 14<abc|utest 16|utest 16|ps" ;;
-  shell)     CMDS="pwd|mkdir /a|cd /a|pwd|echo hi there > f.txt|cat f.txt|cp f.txt g.txt|ls|mv g.txt h.txt|stat h.txt|head h.txt|cd ..|rm /a/f.txt|rm /a/h.txt|rmdir /a|ls|uname|ps|cat /proc/meminfo|nosuch|kill 9999|ls /nonexistent|cd /nonexistent|write w.txt hello world|cat w.txt|echo more >> w.txt|cat w.txt|hexdump w.txt|rm w.txt|utest 19|pwd|date|devices" ;;
-  proc)      CMDS="free|utest 17 &|ps|kill 3|ps|wait|utest 18|utest 20|ps|kill 8|sleep 300|ps|free" ;;
-  fs)        CMDS="utest 15|utest 15|utest 16|ps" ;;
-  faults)    CMDS="utest 3|utest 8|utest 9|utest 10|utest 11|utest 0|ps" ;;
-  pipe)      CMDS="utest 21|ps" ;;
-  exec)      CMDS="ls /bin|utest 24|utest 22|ps" ;;
+  ring3)     CMDS="utest 0@utest 12@ps" ;;
+  syscall)   CMDS="utest 1@utest 2@utest 6" ;;
+  scheduler) CMDS="utest 4 &@utest 5 &@wait@utest 4 &@utest 6@wait@ps" ;;
+  usercopy)  CMDS="utest 7@ps" ;;
+  stdio)     CMDS="utest 13@utest 14<abc@utest 16@utest 16@ps" ;;
+  shell)     CMDS="pwd@mkdir /a@cd /a@pwd@echo hi there > f.txt@cat f.txt@cp f.txt g.txt@ls@mv g.txt h.txt@stat h.txt@head h.txt@cd ..@rm /a/f.txt@rm /a/h.txt@rmdir /a@ls@uname@ps@cat /proc/meminfo@nosuch@kill 9999@ls /nonexistent@cd /nonexistent@write w.txt hello world@cat w.txt@echo more >> w.txt@cat w.txt@hexdump w.txt@rm w.txt@utest 19@pwd@date@devices" ;;
+  proc)      CMDS="free@utest 17 &@ps@kill 3@ps@wait@utest 18@utest 20@ps@kill 8@sleep 300@ps@free" ;;
+  fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
+  faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
+  pipe)      CMDS="utest 21@utest 25 | utest 26@utest 1 > /redir.txt@cat /redir.txt@utest 25 | utest 26 | utest 26@ps" ;;
+  exec)      CMDS="ls /bin@utest 24@utest 22@ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
 
@@ -38,7 +40,7 @@ wait_prompts() {   # $1 = wanted prompt count, 30 s limit
 }
 wait_prompts 1
 n=1
-for c in $(echo "$CMDS" | tr ' ' '~' | tr '|' ' '); do
+for c in $(echo "$CMDS" | tr ' ' '~' | tr '@' ' '); do
   line=$(echo "$c" | tr '~' ' ')
   case $line in
     *"<"*) printf '%s\n' "${line%%<*}" >&3
@@ -189,6 +191,12 @@ case $SUITE in
   expect 'T21: drain_ok=1 got=4096'        'all buffered bytes survive the writer closing'
   expect 'T21: eof=1'                      'drained pipe then reports EOF'
   expect 'T21: badptr=-14'                 'pipe() with a kernel pointer -> EFAULT'
+  expect 'T25: sent'                      'pipeline writer started'
+  expect 'T26: got=21'                    'pipeline: 21 bytes crossed the pipe, then EOF'
+  expect '^alpha$'                        'pipeline payload arrived intact'
+  expect '^T26: got=33$'                  'three-stage pipeline: stage 2 output became stage 3 input (12+21 bytes)'
+  expect '^alpha$'                        'three-stage payload still intact'
+  expect 'T1: getpid=1'                   'stdout redirected into /redir.txt (cat reads it back)'
   reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
   exec)
   expect '^-  utest'                        'ELF programs installed in /bin'

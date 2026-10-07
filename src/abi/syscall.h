@@ -27,6 +27,13 @@
  *
  *   SYS_SPAWN   (name, argv) -> pid  create child from a built-in program;
  *                                    argv = NULL-terminated array of strings (<= SPAWN_ARGS_MAX)
+ *   SYS_SPAWNFDS(name, argv, in, out, err) -> pid
+ *                                    as SYS_SPAWN, but the child's fds 0/1/2 come
+ *                                    from the caller's descriptors in/out/err;
+ *                                    a negative value leaves that fd closed in
+ *                                    the child. Every other child fd is closed.
+ *                                    This is how a shell does `>` and `|` without
+ *                                    fork()+dup2().
  *   SYS_WAITPID (pid|-1, int *status) BLOCKS until a child exits; reaps it; -ECHILD if none
  *   SYS_CHDIR   (path)              per-process working directory
  *   SYS_GETCWD  (buf, size) -> len
@@ -81,7 +88,8 @@
 #define SYS_CLEAR   25
 #define SYS_PIPE    26
 #define SYS_EXEC    27
-#define SYS_MAX     27
+#define SYS_SPAWNFDS 28
+#define SYS_MAX     28
 
 #define E_PERM    1
 #define E_SRCH    3

@@ -338,6 +338,9 @@ struct process *process_create_kthread(const char *name, void (*entry)(void));
 void      process_init(void);
 void      fd_init_std(struct process *p);      /* fds 0,1,2 -> console */
 void      fd_close_all(struct process *p);
+/* Replace a new child's fds 0/1/2 with descriptors of the current process
+ * (see sysfile.c). map[i] < 0 leaves the child's fd i closed. IF must be 0. */
+void      fd_inherit_std(struct process *child, const int map[3]);
 void      process_start(void) __attribute__((noreturn));
 void      process_exit(int code) __attribute__((noreturn));
 int       process_wait(struct process *p);      /* kernel-side wait + reap */

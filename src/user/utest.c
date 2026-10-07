@@ -283,6 +283,25 @@ int user_main(int argc, char **argv) {
         puts_("T24: alive\n");
         return 0;
     }
+    case 25: {  /* pipeline writer: everything on fd 1 goes into the pipe */
+        puts_("T25: sent\n");
+        const char *payload = "alpha\nbeta\n";
+        sys_write(1, payload, (u32)strlen(payload));
+        return 0;
+    }
+    case 26: {  /* pipeline reader: drain fd 0 until EOF, then report */
+        char buf[128];
+        int total = 0;
+        for (;;) {
+            int n = sys_read(0, buf + total, sizeof(buf) - (u32)total);
+            if (n <= 0) break;
+            total += n;
+            if (total >= (int)sizeof(buf)) break;
+        }
+        puts_("T26: got="); putint(total); puts_("\n");
+        sys_write(1, buf, (u32)total);
+        return 0;
+    }
     case 12: {  /* exit status */
         return 42;
     }

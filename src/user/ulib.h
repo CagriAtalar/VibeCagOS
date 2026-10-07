@@ -40,6 +40,18 @@ static inline int sys_pipe(int *fds)                         { return syscall3(S
 static inline int sys_exec(const char *path, const char *const *argv) {
     return syscall3(SYS_EXEC, (u32)path, (u32)argv, 0);
 }
+/* Spawn a child whose fds 0/1/2 are this process's in/out/err descriptors;
+ * a negative value leaves that fd closed in the child. */
+static inline int sys_spawnfds(const char *name, const char *const *argv,
+                               int in, int out, int err) {
+    int r;
+    __asm__ __volatile__("int $0x80"
+                         : "=a"(r)
+                         : "a"(SYS_SPAWNFDS), "b"((u32)name), "c"((u32)argv),
+                           "d"((u32)in), "S"((u32)out), "D"((u32)err)
+                         : "memory", "cc");
+    return r;
+}
 
 /* ---- tiny libc (ulib.c). No kernel code is reachable from here. ---- */
 typedef unsigned int usize;

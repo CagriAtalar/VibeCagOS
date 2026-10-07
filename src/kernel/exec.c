@@ -37,6 +37,9 @@
 /* Largest program image we will read into a kernel buffer. */
 #define EXEC_MAX_IMAGE (512 * 1024)
 
+/* Defined below: spawn with an explicit fd map for the child. */
+int sys_spawnfds(const char *uname, const char *const *uargv, const int map[3]);
+
 /* Scratch buffer for the image being loaded. Static on purpose: one exec at a
  * time is enough (a second exec in the same process can only happen after the
  * first one has left this function and entered Ring 3). */
@@ -99,6 +102,12 @@ int exec_copy_argv(const char *const *uargv, char args[][SPAWN_ARG_LEN],
 }
 
 int sys_spawn(const char *uname, const char *const *uargv) {
+    const int console[3] = { 0, 1, 2 };
+    return sys_spawnfds(uname, uargv, console);
+}
+
+int sys_spawnfds(const char *uname, const char *const *uargv,
+                 const int map[3]) {
     char name[32];
     int r = strncpy_from_user(name, uname, sizeof(name));
     if (r < 0) return r == -E_INVAL ? -E_NAMETOOLONG : r;
@@ -120,9 +129,19 @@ int sys_spawn(const char *uname, const char *const *uargv) {
     uint32_t fl = irq_save();
     c->ppid = current_proc->pid;
     strcpy(c->cwd, current_proc->cwd[0] ? current_proc->cwd : "/");
+    fd_inherit_std(c, map);
     irq_restore(fl);
     return c->pid;
 }
+
+/*
+ * SYS_SPAWNFDS(name, argv, in, out, err) -> pid
+ *
+ * Same as SYS_SPAWN, but the child's fds 0/1/2 are taken from the caller's
+ * descriptor numbers `in`/`out`/`err`; a negative value leaves that fd closed
+ * in the child. This is how the shell redirects output and wires up `|`
+ * pipelines without a fork()+dup2() pair. See fd_inherit_std().
+ */
 
 /* ---- exec --------------------------------------------------------------- */
 

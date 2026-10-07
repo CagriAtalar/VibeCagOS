@@ -49,6 +49,20 @@ void pipe_close_write(struct pipe *p) {
     if (dead) kfree(p);
 }
 
+/* Extra reference on one end, taken when a descriptor is duplicated into
+ * another process (spawn with inherited fds). */
+void pipe_dup_read(struct pipe *p) {
+    uint32_t fl = irq_save();
+    if (p) p->nreaders++;
+    irq_restore(fl);
+}
+
+void pipe_dup_write(struct pipe *p) {
+    uint32_t fl = irq_save();
+    if (p) p->nwriters++;
+    irq_restore(fl);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Transfer                                                                  */
 /* ------------------------------------------------------------------------ */

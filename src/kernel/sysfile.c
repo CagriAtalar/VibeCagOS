@@ -317,6 +317,43 @@ int sys_fstat(uint32_t fd, void *ustat) {
     return put_stat(ustat, &st);
 }
 
+/* ---- fd inheritance ----------------------------------------------------- */
+
+/*
+ * Replace a freshly created child's fds 0/1/2 with descriptors taken from the
+ * CURRENT process.
+ *
+ *   map[i] = the parent's fd to use as the child's fd i
+ *   map[i] < 0                  -> the child's fd i is closed
+ *   map[i] == i                 -> the child keeps the default console
+ *
+ * This is how a shell hands a pipeline or a redirection to a child without
+ * needing fork() + dup2(): the parent already holds the pipe ends or the open
+ * file, so it just says "your stdout is my fd 7".
+ *
+ * Everything else in the child's table is closed, so a child can never inherit
+ * a half-open file the parent did not mean to share. Pipe ends are reference
+ * counted per end, so both processes may hold the same pipe and only the last
+ * close frees it.
+ *
+ * Call with IF=0 (spawn does).
+ */
+void fd_inherit_std(struct process *child, const int map[3]) {
+    struct fdent src[3];
+    for (int i = 0; i < 3; i++) {
+        int f = map[i];
+        src[i] = (f >= 0 && f < OPEN_MAX && current_proc->fds[f].type != FD_NONE)
+                     ? current_proc->fds[f]
+                     : (struct fdent){ FD_NONE, 0, 0, NULL, NULL };
+        if (src[i].type == FD_PIPE && src[i].pipe) {
+            if (src[i].can_read) pipe_dup_read(src[i].pipe);
+            else                 pipe_dup_write(src[i].pipe);
+        }
+    }
+    fd_close_all(child);
+    for (int i = 0; i < 3; i++) child->fds[i] = src[i];
+}
+
 /* ---- namespace operations ---------------------------------------------- */
 
 int sys_mkdir(const char *upath, uint32_t mode) {

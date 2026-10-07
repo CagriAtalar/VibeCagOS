@@ -13,6 +13,7 @@
 #include "ulib.h"
 
 #define MAXARGS 16
+#define MAXSTAGES 8
 #define LINE_MAX 256
 
 static int ofd = 1;     /* where builtins write (1, or a redirected file) */
@@ -242,13 +243,17 @@ static int cmd_help(int argc, char **argv) {
     (void)argc; (void)argv;
     out("VibeCagOS user shell (Ring 3). Builtins:\n"
         "  ls [-l] [dir]  cd [dir]  pwd  mkdir  rmdir  touch  rm  mv  cp  cat  head [-n N]\n"
-        "  echo [text] [> file | >> file]  write <file> <text>  stat  hexdump\n"
+        "  echo [text]  write <file> <text>  stat  hexdump\n"
         "  ps  kill <pid>  wait  sleep <ms>  uptime  date  uname  free  mem\n"
         "  cpuinfo  devices  pci  dmesg  mounts  net  clear  help  exit\n"
         "  exec <program> [args...]  replace this shell with another ELF program\n"
+        "Syntax:\n"
+        "  cmd > file   cmd >> file   redirection (builtins and programs)\n"
+        "  cmd1 | cmd2  pipelines between programs, e.g. utest 21 | cat\n"
+        "  cmd &        run in the background; 'wait' reaps them\n"
         "Programs (spawned in their own address space, ELF32 images):\n"
-        "  utest <n>   Ring-3 self tests;  add '&' to run in the background\n"
-        "  /bin/utest <n>  the same program, named by path (ELF loaded by the kernel)\n");
+        "  utest <n>   Ring-3 self tests\n"
+        "  /bin/utest <n>  the same program, named by path\n");
     return 0;
 }
 
@@ -301,9 +306,20 @@ static int run_builtin(int argc, char **argv, int *found) {
     return 0;
 }
 
-static int run_program(int argc, char **argv, int background) {
+/*
+ * Run one command. `in`/`out`/`err` are the descriptors the program should see
+ * as fds 0/1/2; -1 closes that fd. Builtins are handled in-process (their
+ * output fd is redirected instead), programs are spawned with those
+ * descriptors via SYS_SPAWNFDS.
+ */
+static int run_one(char **argv, int argc, int in, int out, int err, int background) {
+    int found = 0;
+    if (out != 1) { ofd = out; run_builtin(argc, argv, &found); ofd = 1; }
+    else          run_builtin(argc, argv, &found);
+    if (found) return 0;
+
     argv[argc] = 0;
-    int pid = sys_spawn(argv[0], (const char *const *)argv);
+    int pid = sys_spawnfds(argv[0], (const char *const *)argv, in, out, err);
     if (pid < 0) {
         if (pid == -E_NOENT) uprintf(2, "sh: %s: command not found\n", argv[0]);
         else fail("sh", argv[0], pid);
@@ -337,6 +353,68 @@ static int tokenize(char *line, char **argv, int max) {
     return argc;
 }
 
+/*
+ * Run a pipeline: `cmd1 | cmd2 [| cmd3 ...]`.
+ *
+ * Every stage but the last gets a fresh pipe: its fd 1 is the write end and the
+ * next stage's fd 0 is the read end. The shell drops its own copies as soon as
+ * a stage has been spawned - if it kept a write end open the reader would never
+ * see EOF, because EOF means "no write end is open anywhere".
+ *
+ * Stages are programs, not builtins: a builtin would run inside the shell and
+ * read the pipe itself, which needs a different design.
+ */
+static int run_pipeline(char **argv, int argc) {
+    int pids[MAXSTAGES];
+    int npids = 0;
+    int rc = 0;
+
+    int stages = 1;
+    for (int i = 0; i < argc; i++) if (!strcmp(argv[i], "|")) stages++;
+    if (stages > MAXSTAGES) { uputs(2, "sh: too many pipeline stages\n"); return 1; }
+
+    int pending = -1;          /* the shell's read end for the stage we spawn */
+    int start = 0;
+    for (int s = 0; s < stages; s++) {
+        int end = start;
+        while (end < argc && strcmp(argv[end], "|")) end++;
+
+        int last = (s == stages - 1);
+        int in = pending, out = 1, next = -1;
+        if (!last) {
+            int fds[2];
+            if (sys_pipe(fds) < 0) { uputs(2, "sh: pipe failed\n"); return 1; }
+            out = fds[1];
+            next = fds[0];
+        }
+
+        /* the kernel reads argv until NULL, so terminate the stage in place */
+        char *saved = argv[end];
+        argv[end] = 0;
+        int pid = sys_spawnfds(argv[start], (const char *const *)(argv + start),
+                               in, out, 2);
+        argv[end] = saved;
+
+        if (in >= 0) sys_close(in);
+        if (!last) sys_close(out);
+        pending = next;
+
+        if (pid < 0) {
+            uprintf(2, "sh: %s: cannot run\n", argv[start]);
+            rc = 127;
+        } else {
+            pids[npids++] = pid;
+        }
+        start = end + 1;
+    }
+
+    for (int i = 0; i < npids; i++) {
+        int st = 0;
+        sys_waitpid(pids[i], &st);
+    }
+    return rc;
+}
+
 static void execute(char *line) {
     char *argv[MAXARGS + 1];
     int argc = tokenize(line, argv, MAXARGS);
@@ -345,7 +423,17 @@ static void execute(char *line) {
     int background = 0;
     if (!strcmp(argv[argc - 1], "&")) { background = 1; argc--; }
 
-    /* redirection: ... > file | ... >> file */
+    if (!strcmp(argv[0], "exit")) {
+        uputs(1, "System halting. Goodbye!\n");
+        sys_exit(0);
+    }
+
+    /* pipelines: a '|' anywhere turns the line into a pipeline */
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "|")) { run_pipeline(argv, argc); return; }
+    }
+
+    /* redirection: cmd > file  |  cmd >> file   (last two words) */
     const char *redir = 0; int append = 0;
     if (argc >= 3 && (!strcmp(argv[argc - 2], ">") || !strcmp(argv[argc - 2], ">>"))) {
         append = argv[argc - 2][1] == '>';
@@ -354,23 +442,14 @@ static void execute(char *line) {
     }
     if (argc == 0) return;
 
-    if (!strcmp(argv[0], "exit")) {
-        uputs(1, "System halting. Goodbye!\n");
-        sys_exit(0);
-    }
-
-    int found = 0;
     if (redir) {
         int fd = sys_open(redir, O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC), 0644);
         if (fd < 0) { fail("sh", redir, fd); return; }
-        ofd = fd;
+        run_one(argv, argc, 0, fd, 2, background);
+        sys_close(fd);
+        return;
     }
-    run_builtin(argc, argv, &found);
-    if (redir) { sys_close(ofd); ofd = 1; }
-    if (!found) {
-        if (redir) uputs(2, "sh: note: redirection is not supported for programs\n");
-        run_program(argc, argv, background);
-    }
+    run_one(argv, argc, 0, 1, 2, background);
 }
 
 int user_main(int argc, char **argv) {

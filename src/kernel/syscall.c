@@ -21,6 +21,7 @@
 /* SYS_SPAWN / SYS_EXEC (exec.c). Declared here rather than in sysfile.h
  * because they own program loading, not file descriptors. */
 int sys_spawn(const char *uname, const char *const *uargv);
+int sys_spawnfds(const char *uname, const char *const *uargv, const int map[3]);
 int sys_exec(const char *upath, const char *const *uargv);
 
 static int sys_getinfo(void *ubuf) {
@@ -51,6 +52,13 @@ void syscall_dispatch(struct trap_frame *f) {
     case SYS_LSEEK:   ret = sys_lseek(a1, (int)a2, a3);          break;
     case SYS_READDIR: ret = sys_readdir(a1, (void *)a2, a3);     break;
     case SYS_SPAWN:   ret = sys_spawn((const char *)a1, (const char *const *)a2); break;
+    /* (name, argv, in, out, err). in/out/err are plain descriptor numbers, not
+     * pointers, so there is nothing here for usercopy to validate. */
+    case SYS_SPAWNFDS: {
+        int map[3] = { (int)a3, (int)f->esi, (int)f->edi };
+        ret = sys_spawnfds((const char *)a1, (const char *const *)a2, map);
+        break;
+    }
     case SYS_EXEC:    ret = sys_exec((const char *)a1, (const char *const *)a2); break;
     case SYS_WAITPID: ret = sys_waitpid((int)a1, (int *)a2);     break;
     case SYS_CHDIR:   ret = sys_chdir((const char *)a1);         break;
