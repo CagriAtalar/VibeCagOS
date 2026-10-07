@@ -1,311 +1,231 @@
 # VibeCagOS — Architecture Audit
 
-> **Audit date:** 2026-10-02 | **Boot-tested in QEMU** | **Build verified**
+> **Audit date:** 2026-10-07
+> **Basis:** source read of every tracked file, not the README. Every claim below
+> was checked against the code and, where marked *(verified)*, against a QEMU
+> serial run (`make test-all`, 11 suites).
+> **Scope:** describes the kernel as it exists now, including its known defects.
 
 ---
 
-## 1. Current Boot Flow
+## 1. Boot flow
 
 ```
-BIOS firmware
-    |
-    v
-GRUB (Multiboot v1) - loads kernel.elf at 0x100000 (1 MiB)
-    |
-    v
-boot.s _start
-    |  cli, set esp=__stack_top, clear EFLAGS
-    v
-kernel_main()
-    +-- memset __bss, 0
-    +-- vga_init()      (0xB8000 text buffer, 80x25)
-    +-- serial_init()   (COM1 0x3F8)
-    +-- idt_init()      (256-entry IDT, only int 0x80 installed)
-    +-- pic_init()      (8259 PIC remapped 0x20/0x28, ALL IRQs masked)
-    +-- sti()
-    +-- ide_init()      (ATA PIO polling)
-    +-- pci_init()      (scans all 256 buses for RTL8139)
-    +-- nic_init()      (RTL8139 setup)
-    +-- simplefs_mount() or simplefs_format()
-    v
-Interactive shell (busy-loop polling COM1)
+BIOS -> GRUB (Multiboot v1) -> loads kernel.elf at 0x100000
+  |
+boot.s:_start                      cli; esp = __stack_top; eflags = 0
+  |
+kernel_main(mb_magic, mb_info)     src/kernel/kernel.c
+  +-- memset __bss
+  +-- vga_init / serial_init / print_splash
+  +-- klog_init                    ring buffer; readable via /proc/dmesg
+  +-- pmm_init(__free_ram, __free_ram_end)
+  +-- gdt_init                     7 descriptors + TSS  (kernel.c)
+  +-- idt_init                     0x00-0x2F DPL0, 0x80 DPL3   (kernel.c)
+  +-- pic_init                     remap to 0x20/0x28; IRQ0,1,2,12
+  +-- pit_init(100)  +-- sti()
+  +-- paging_init -> vmm_init      identity map, CR0.PG | CR0.WP
+  +-- keyboard_init / rtc_init / kmalloc_init
+  +-- ide_init / pci_init / nic_init / udp_init
+  +-- vfs_init, vibefs mount at "/", procfs at /proc, install_user_programs()
+  +-- devfs at /dev
+  +-- process_init                 idle (pid 0)
+  +-- process_create_kthread kinit (pid 1)
+  +-- process_start()              never returns
+          |
+     switch_context -> idle -> kinit
+          |
+     kinit_main(): create "sh" as a Ring-3 process, process_wait(), power_off()
 ```
 
-**Verified QEMU output:**
-```
-x86 OS - SimpleFS (IDE Disk)
-=====================================
-IDE disk driver initialized
-IDE drive detected and ready
-PCI: Found RTL8139 at 0:3.0  IO=0x0000c000  IRQ=11
-RTL8139: MAC xx:xx:xx:xx:xx:xx  NIC ready
-Mounting SimpleFS...
->
-```
+`run_shell()` still exists but is only reachable through `make KSHELL=1`
+(`#ifdef KSHELL_DEBUG`). It is not on the default boot path. *(verified)*
 
----
+## 2. Memory map and ownership
 
-## 2. Current Memory Map
+| Region | Physical | Owner | Paging |
+|---|---|---|---|
+| 0x00000000–0x000FFFFF | BIOS / VGA 0xB8000 | firmware | kernel, supervisor |
+| 0x00100000 | kernel image (`__kernel_base`) | kernel | kernel, supervisor |
+| `.bss_end` + 128 KiB | boot stack (`__stack_top`) | kernel | kernel |
+| `__free_ram`–`__free_ram_end` | 64 MiB PMM pool | kernel | kernel |
+| 0x10000000 `USER_BASE` | user image | process | **user** |
+| 0x1FFFC000–0x20000000 | user stack (4 pages + guard) | process | **user** |
+| 0x20000000–0xC0000000 | reserved for user growth | — | unmapped |
+| 0xC0000000+ | MMIO | kernel | supervisor |
 
-| Region | Physical Address | Notes |
+`vmm_map_page()` silently strips `PAGE_USER` outside `[USER_BASE, USER_END)` and
+logs an error, so a kernel address cannot become user-accessible by mistake.
+`CR0.WP` is set, so a read-only PTE is enforced against ring 0 as well.
+*(verified: `faults` suite, user read of 0x00100000 faults)*
+
+**Ownership.** `pmm_alloc_frame()` hands out zeroed frames from a bitmap. Each
+process owns the frames its user pages point at; `vmm_destroy_address_space()`
+frees every user page, every user page table and the directory, and is the only
+thing that may free an address space. Kernel page tables are *shared* (copied by
+PDE reference), never freed.
+
+## 3. Segments, TSS and the privilege boundary
+
+| Selector | Descriptor | Used by |
 |---|---|---|
-| NULL / BIOS | 0x00000000–0x000FFFFF | Low 1 MiB |
-| Kernel image | 0x00100000 | Hard-coded in kernel.ld |
-| .boot / .text | 0x00100000+ | Multiboot header first |
-| .rodata | After .text | |
-| .data | After .rodata | |
-| .bss | After .data | Cleared by kernel_main |
-| Kernel stack | bss_end + 128 KiB | Embedded in ELF |
-| Free RAM pool | Stack + 4096 align | 64 MiB bump allocator |
-| VGA text buffer | 0x000B8000 | Direct identity mapped |
+| 0x08 / 0x10 | kernel code / data, DPL 0 | Ring 0 |
+| 0x18 / 0x20 | user code / data, DPL 3 | Ring 3 (`0x1B`/`0x23` with RPL 3) |
+| 0x28 | TSS, `iomap_base = sizeof(tss)` | `ltr` at boot |
 
-**No paging enabled. Virtual == Physical everywhere.**
+The TSS has no I/O permission bitmap, so every bitmap bit beyond the segment
+limit reads as 1: ring 3 is denied *all* port I/O. *(verified: `utest 9`)*
 
----
+`TSS.esp0` is rewritten to the top of the current process's kernel stack on
+every context switch, so any ring 3 → ring 0 transition lands on a private
+stack and the full user context is saved there.
 
-## 3. Current Virtual Address Map
+## 4. Interrupt path
 
-Paging is **disabled**. `create_process()` builds 2-level x86 page tables but `enable_paging()` / `load_cr3()` are never called from `kernel_main()`.
-
----
-
-## 4. Current Interrupt Flow
+`interrupts.s` normalises every vector into one frame:
 
 ```
-int 0x80 (ONLY vector configured in IDT)
-    |
-    v
-isr128 (interrupts.s)
-    | push $0 (dummy error code), push $128 (interrupt number)
-    v
-isr_common
-    | push eax, ecx, edx, ebx, esp, ebp, esi, edi
-    v
-handle_interrupt(struct trap_frame *)
-    |
-    +-- int_no == 128 -> handle_syscall(f)
-    +-- else -> PANIC
-
-No timer, no keyboard, no disk interrupts. ALL PIC IRQs masked.
+low  gs fs es ds | edi esi ebp esp(dummy) ebx edx ecx eax | int_no err_code
+high eip cs eflags | [user_esp user_ss]   <- last two words only if cs&3 == 3
 ```
 
----
+`isr_common` builds it, reloads the kernel data selector, and calls
+`handle_interrupt(f)`; `trapret` unwinds it and `iret`s. Vectors 0–47 use DPL 0
+(`0x8E`), vector 128 uses DPL 3 (`0xEE`), so user code executing `int $0x20`
+takes a #GP instead of reaching the timer ISR. *(verified: `utest 10`)*
 
-## 5. Current Syscall Flow
+`handle_interrupt` dispatch: 14 → `vmm_page_fault_handler`, <32 →
+`handle_exception`, 32 → timer, 33 → keyboard, 44 → mouse, 128 →
+`syscall_dispatch`; every other IRQ is acknowledged and dropped.
 
-System call numbers defined in `common.h` — mostly **unimplemented**:
+## 5. Timer and preemption
 
-| Number | Name | Status |
+PIT channel 0 at 100 Hz → vector 32 → `ticks++` → EOI → poll serial for input →
+`process_tick(f)`. `process_tick` wakes sleepers whose deadline passed and, when
+the trap came from ring 3, decrements the quantum and calls `schedule_locked()`
+once it hits zero.
+
+**Preemption rule: kernel mode is not preemptible.** A ring 3 process can be
+preempted at any instruction; a syscall or kernel thread gives up the CPU only
+at an explicit `yield`/`block_on`/`sleep_ms`. That is a deliberate choice — it
+means no kernel code has to be re-entrant against a timer.
+
+## 6. Scheduler and context switch
+
+`schedule_locked()` (IF=0): mark the current process RUNNABLE, walk `procs[]`
+round robin from the next slot, RUNNABLE wins over `idle`, swap CR3, rewrite
+`TSS.esp0`, then `switch_context(&prev->sp, next->sp)`.
+
+`switch_context` is the xv6-style primitive in `interrupts.s`: it pushes
+`ebp/ebx/esi/edi`, stores ESP, loads the other stack's ESP, pops and `ret`s. It
+is only ever called from a place where the caller never returns (the scheduler
+or a fresh-process bootstrap frame). The trick that makes this safe is that the
+interrupt frame lives on the *per-process kernel stack*, so a preempted process
+simply keeps its frame and resumes through it later. A new process gets a
+hand-built iret frame plus a fake `switch_context` frame returning into
+`trapret`.
+
+Quantum: `TIME_SLICE_TICKS` = 3 ticks (30 ms). *(verified: `scheduler` suite —
+two busy loops that never call yield interleave A/B/A)*
+
+## 7. Process model
+
+One thread per process. `struct process` (kernel.h) holds pid/ppid/state, the
+saved kernel `sp`, the page directory, sleep deadline, wait channel, quantum,
+exit code, entry/esp, name, the fd table (`OPEN_MAX` 16) and a per-process cwd,
+plus a 32 KiB kernel stack with a canary at its bottom, checked on every switch.
+
+States: `UNUSED CREATED RUNNABLE RUNNING SLEEPING BLOCKED ZOMBIE`.
+`PROCS_MAX` is 16. Exit goes to `ZOMBIE` and is reaped by `waitpid()` or, for
+orphans (`ppid == -1`), by the idle thread. *(verified: `proc` suite, including
+that `FramesFree` is identical before and after a spawn/kill/orphan cycle)*
+
+## 8. Syscalls
+
+`int 0x80`, `EAX` = number, `EBX/ECX/EDX/ESI/EDI` = args, result in `EAX`.
+Numbers and per-call contracts live in `src/abi/syscall.h`; the dispatcher is
+`syscall_dispatch()` in `syscall.c`; file calls are in `sysfile.c`; program
+loading is in `exec.c`. A negative return is `-errno`.
+
+## 9. User memory safety
+
+`usercopy.c` is the only way a user pointer is touched. `copy_from_user()`,
+`copy_to_user()`, `strncpy_from_user()` and `user_range_valid()` check, for
+**every** page of the range: inside `[USER_BASE, USER_END)`, no wrap-around,
+PDE and PTE present, `PAGE_USER` set, and `PAGE_WRITE` set for destinations.
+Nothing is copied unless the whole range validates. *(verified: `usercopy`
+suite — NULL, kernel address, unmapped, wrap, cross-page, read-only)*
+
+## 10. Programs and filesystems
+
+User programs are ELF32 executables (`src/user/user.ld`, one `PT_LOAD` per
+permission class). `src/kernel/elf.c` loads them; it validates the header, every
+program header against the real image size and the user window, copies
+`p_filesz`, leaves `.bss` zero, and demotes pages no `PF_W` segment covers.
+`ET_DYN` is refused, so there is no PIC and no dynamic linker.
+
+`spawn("name")` uses the built-in table (`progs.c`, images `.incbin`'d into the
+kernel); `spawn("/bin/x")` and `exec("/bin/x")` read the file through the VFS.
+Both end in the same `elf_load()`. `exec` replaces the address space and CR3,
+keeps fds 0/1/2, closes the rest, and enters the new image through a fresh iret
+frame on the kernel stack. *(verified: `exec` suite)*
+
+VFS layer over VibeFS (inode/directory tree on the IDE disk), procfs (`/proc`)
+and devfs (`/dev`).
+
+## 11. Critical CPU flows
+
+```
+A. user -> syscall
+   Ring3 | int $0x80 -> CPU loads SS0:ESP0 from TSS, pushes ss/esp/eflags/cs/eip
+         -> isr128 -> isr_common (frame + kernel DS)
+         -> handle_interrupt -> syscall_dispatch -> kernel subsystem
+         -> f->eax = result -> trapret -> iret -> Ring3
+
+B. user -> timer -> another process
+   Ring3 | IRQ0 -> TSS.esp0 -> isr32 -> isr_common (frame on THIS process's
+         kernel stack) -> handle_interrupt: ticks++, EOI, process_tick
+         -> schedule_locked -> switch_context (kernel stacks swapped, CR3 and
+            TSS.esp0 updated) -> the next process resumes up ITS OWN call chain
+         -> trapret -> iret -> Ring3 of the next process
+
+C. user -> filesystem
+   shell -> libc wrapper -> int $0x80 -> syscall_dispatch -> sys_open
+         -> usercopy (path validated) -> path_resolve -> VFS -> VibeFS -> IDE
+
+D. keyboard
+   PS/2 -> IRQ1 -> isr33 -> keyboard_handle_irq -> kb ring buffer
+         -> wakeup(console_chan) -> blocked SYS_READ wakes -> copy_to_user -> sh
+```
+
+## 12. Kernel / user dependency rule
+
+`src/user/*` includes only `src/abi/syscall.h` and its own `ulib.*`. It cannot
+reach `vfs_open`, `kmalloc`, `pmm`, `vmm`, `outb`, `cli` or VGA: none of those
+symbols are linked into a user image, and ring 3 cannot call them anyway.
+
+## 13. Known defects and limitations
+
+| # | Issue | Severity |
 |---|---|---|
-| 1 | SYS_PUTCHAR | Implemented |
-| 2 | SYS_GETCHAR | Implemented (busy-loop) |
-| 3 | SYS_EXIT | Implemented (dead code) |
-| 4 | SYS_READFILE | Defined, NO HANDLER |
-| 5 | SYS_WRITEFILE | Defined, NO HANDLER |
-| 6–10 | SYS_ADDFILE, etc | Defined, NO HANDLER |
+| 1 | `exec` abandons the kernel C frames below ESP; the memory is not reclaimed until the process dies | low |
+| 2 | `exec_image` is a 512 KiB static buffer, so a second exec cannot overlap the first | low, by design |
+| 3 | User programs are still linked into the kernel image and copied to `/bin` at boot | medium (documented staging) |
+| 4 | All shell commands are builtins; `ls`, `cat`, … are not separate user programs | medium |
+| 5 | No fd inheritance, so `spawn` cannot redirect a child and the shell has no `|` pipelines | medium |
+| 6 | `PF_X` is parsed but not enforced: 32-bit paging without PAE has no NX bit | low, inherent |
+| 7 | `vibefs_alloc_block()` rebuilds a `VIBEFS_DATA_SECTORS`-entry bitmap per block: O(inodes × blocks) per allocation | low |
+| 8 | No permission enforcement in VibeFS: `mode` is stored but never checked | medium |
+| 9 | Single-CPU only: no locking anywhere; `run-smp` exists but schedules one CPU | low |
+| 10 | `struct process` embeds a 32 KiB stack, so 16 processes cost 512 KiB of BSS | low |
+| 11 | Maximum file size is 60 KiB (120 direct blocks, no indirection) | low |
+| 12 | Kernel page faults are fatal even when a user process caused them indirectly | low |
+| 13 | No `dup2`, no signal handling; `kill` is immediate | low |
+| 14 | The GUI (`src/drivers/gui.c`) still runs in ring 0 | see roadmap |
 
-All syscall code is **dead code** — no user processes exist.
+## 14. Migration status
 
----
-
-## 6. Current Process Creation Flow
-
-`create_process(image, size)` exists but is **never called**:
-
-1. Find free slot in `procs[8]`
-2. Set up kernel stack with `user_entry` as return address
-3. Allocate page directory (via `alloc_pages(1)`)
-4. Map kernel identity (`__kernel_base`–`__free_ram_end`)
-5. Copy image to user pages at `USER_BASE = 0x1000000`
-6. Mark `PROC_RUNNABLE`
-
-Since paging is disabled and `create_process` is never invoked, no processes run.
-
----
-
-## 7. Current Context-Switch Flow
-
-`switch_context(prev_sp, next_sp)` and `yield()` exist as **dead code**:
-
-```asm
-push ebp, ebx, esi, edi
-mov [eax], esp     ; save prev->sp
-mov esp, [edx]     ; load next->sp
-pop edi, esi, ebx, ebp
-ret                ; jump to new task's saved return address
-```
-
----
-
-## 8. Current Filesystem Flow
-
-```
-Shell: "create foo.txt"
-    |
-    v
-simplefs_create("foo.txt")
-    | find_free_inode() - O(n) linear scan
-    | init inode in memory
-    | read_write_disk(sector, write=1)
-    v
-ide_write_sector(lba, buf)
-    | outb/inw PIO ATA
-    v
-ATA disk hardware
-```
-
-**Disk layout:**
-- Sector 0: Superblock
-- Sectors 1–10: Inode table (64 inodes)
-- Sectors 11+: Data blocks (first-fit, O(n) search per write)
-
----
-
-## 9. Current Input Flow
-
-```
-COM1 serial port (0x3F8) — POLLING ONLY
-    | busy-loop: while (inb(COM1+5) & 1) == 0) ;
-    v
-getchar() returns char or -1
-    |
-    v
-Shell loop in kernel_main (while(1))
-```
-
-No PS/2 keyboard driver. No interrupt-driven input.
-
----
-
-## 10. Current Output / Rendering Flow
-
-```
-putchar(ch)
-    |
-    +-- wait for COM1 TX ready (busy-loop)
-    +-- outb(COM1, ch) -> serial
-    +-- vga_putchar(ch) -> 0xB8000 text buffer (80x25, white-on-black)
-```
-
-No framebuffer. No colors. No graphics. No GUI.
-
----
-
-## 11. Current Build Flow
-
-```
-make
-    | clang -m32 *.s -> *.o
-    | clang -m32 *.c -> *.o (9 translation units)
-    | clang -Wl,-T kernel.ld -> kernel.elf
-    v
-grub-mkrescue -> os.iso
-
-make run:
-    qemu-system-i386 -cdrom os.iso -hda disk.img -serial stdio
-    -m 128M -display none -netdev user,id=n0 -device rtl8139,netdev=n0
-```
-
-Build works on WSL2 Ubuntu with clang-18, lld, grub-pc-bin, qemu-system-i386.
-
----
-
-## 12. Known Limitations
-
-| # | Limitation | Severity |
-|---|---|---|
-| 1 | Paging never enabled | Critical |
-| 2 | No userspace — everything ring 0 | Critical |
-| 3 | No timer interrupt (IRQ0 masked) | High |
-| 4 | No keyboard driver (only serial) | High |
-| 5 | No framebuffer/graphics (80x25 VGA text) | High |
-| 6 | First file write bug (README acknowledges) | Medium |
-| 7 | Max file size 2 KB (4 block pointers) | Medium |
-| 8 | No kfree() — bump allocator only | Medium |
-| 9 | No GDT/TSS setup | High |
-| 10 | Duplicate inb/outb in ide.c and kernel.h | Low |
-| 11 | All PIC IRQs masked (0xFF/0xFF) | High |
-| 12 | No ACPI, no time source | Medium |
-| 13 | No path handling — flat namespace | Medium |
-| 14 | Hard-coded 64 MiB RAM in linker | Medium |
-
----
-
-## 13. Known Correctness Problems
-
-**Critical:**
-- `create_process()` builds page tables that are never activated (paging off)
-- No TSS — ring 3 iret would triple-fault immediately
-- ISR: `popl %esp` in isr_common is architecturally problematic
-- `strcpy(inode->filename, filename)` — no 56-byte bounds check
-
-**High:**
-- Linker embeds 64 MiB RAM pool in ELF BSS (huge binary / slow load)
-- `alloc_block()` is O(n^2) — rescans all inodes per write
-- First file write bug (off-by-one in block pointer init)
-- `SYS_GETCHAR` busy-loops consuming 100% CPU while waiting
-
----
-
-## 14. Proposed Architecture
-
-```
-+--------------------------------------------------+
-|           USER SPACE (Ring 3)                    |
-|  init | shell | ps | ls | cat | GUI apps         |
-+--------------------------------------------------+
-|           SYSCALL BOUNDARY (int 0x80)            |
-+--------------------------------------------------+
-|           KERNEL (Ring 0)                        |
-|                                                  |
-|  TTY/shell    VFS/SimpleFS   Scheduler           |
-|  VMM (virtual memory)  PMM (frame allocator)     |
-|  IDT/GDT/TSS  PIT timer  PS/2 keyboard           |
-|                                                  |
-|  DRIVERS: VGA | IDE | PCI | RTL8139             |
-+--------------------------------------------------+
-|           GRUB Multiboot (retained)              |
-+--------------------------------------------------+
-```
-
----
-
-## 15. Migration Plan
-
-**Phase 1 — Foundation**
-- Proper GDT: null, kernel code/data, user code/data, TSS
-- TSS for ring3→ring0 kernel stack
-- Enable paging (identity map)
-- PIT IRQ0: preemptive scheduler tick
-- PS/2 IRQ1: scancode→ASCII keyboard driver
-- Informative panic screen with register dump
-
-**Phase 2 — Memory Management**
-- Bitmap physical frame allocator
-- kmalloc/kfree kernel heap
-- VM manager (map/unmap/protect)
-
-**Phase 3 — Scheduler and Processes**
-- Preemptive round-robin scheduler
-- RUNNING/READY/SLEEPING/ZOMBIE states
-- sleep/wake/yield/exit/wait
-
-**Phase 4 — Userspace**
-- Ring 3 process launch
-- Syscall table with validation
-- copy_from_user / copy_to_user
-
-**Phase 5 — Shell Improvements**
-- Command history, arrow keys
-- Color VGA output
-- ps, mem, uptime, uname, clear
-
-**Phase 6 — Filesystem Fixes**
-- Fix first-file write bug
-- Larger file support
-- Better block allocator
-
-**Phase 7 — Documentation and Testing**
-- Complete docs/ directory
-- Host unit tests
-- QEMU integration tests
+Milestones 0–14 of the plan in the task are done and covered by tests; see
+`docs/ROADMAP.md` for what is left. The two structural items that were still
+open when this audit was written — the ELF loader and `exec` — landed in the
+commit "exec: ELF32 loader, filesystem-backed programs and SYS_EXEC".
