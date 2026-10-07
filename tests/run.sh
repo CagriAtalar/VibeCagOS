@@ -6,7 +6,7 @@
 QEMU=${QEMU:-qemu-system-i386}
 SUITE=$1
 IMG=$(mktemp /tmp/vibe-disk.XXXXXX); LOG=$(mktemp /tmp/vibe-log.XXXXXX)
-dd if=/dev/zero of="$IMG" bs=1M count=2 status=none
+dd if=/dev/zero of="$IMG" bs=1M count=16 status=none
 trap '' PIPE   # QEMU may exit while we still write: never die of SIGPIPE
 trap 'rm -f "$IMG" "$LOG"' EXIT
 
@@ -24,7 +24,7 @@ case $SUITE in
   # fixed, so the ids stay deterministic. utest 17 & = pid 4; ps = 5; kill = 6;
   # ps = 7; utest 18 = 8 (children 9,10); utest 20 = 11, its orphaned sleeper = 12.
   proc)      CMDS="free@utest 17 &@ps@kill 4@ps@wait@utest 18@utest 20@ps@kill 12@sleep 300@ps@free" ;;
-  fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
+  fs)        CMDS="utest 15@utest 28@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
   pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
   exec)      CMDS="ls /bin@ls -l /bin@utest 24@utest 27@utest 22@ps" ;;
@@ -179,6 +179,12 @@ case $SUITE in
   expect 'T15: rmdir=0'                    'rmdir'
   expect 'T15: unlink=0'                   'unlink'
   expect 'T15: stat_after_unlink=-2'       'gone after unlink'
+  expect 'T28: wrote=1572864 size=1572864 write_ok=1' 'large file: 1.5 MiB written past both indirect levels'
+  expect 'T28: read_ok=1 size_ok=1'        'large file reads back byte-for-byte'
+  expect 'T28: overwrite_ok=1 size_kept=1' 'in-place overwrite deep in double-indirect region'
+  expect 'T28: trunc=0 trunc_size=204800 prefix_ok=1 eof_ok=1' 'truncate frees indirect blocks, prefix intact'
+  expect 'T28: unlink_ok=1'                'large file removed'
+  expect 'T28: pass=1'                     'large-file test passed'
   reject 'PANIC|EXCEPTION|killed'          'no panic / no kill' ;;
  faults)
   expect 'T3: before kernel read'          'T3 started'

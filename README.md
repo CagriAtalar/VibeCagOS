@@ -111,7 +111,7 @@ utest <n>       run a Ring-3 self test (& = background)
 
 `make test-all` runs the deterministic QEMU suites: `ring3`, `syscall`,
 `scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `pipe`, `proc`,
-`exec`.
+`exec`, `persist`.
 
 ---
 
@@ -226,7 +226,7 @@ VibeCagOS/
    - Inode-based disk filesystem supporting nested directories (`/home/user`, `/var/log`, `/usr/bin`, etc.).
    - Multi-block directory entries with `.` and `..` support.
    - Max file size up to 8KB at the time (16 direct blocks × 512 bytes);
-     since grown to 60 KiB (120 direct blocks). See docs/ for current limits.
+     since grown to ~8 MiB via single- and double-indirect blocks). See docs/ for current limits.
    - Inode sector flushing and block bitmap allocator.
 
 4. **procfs Pseudo-Filesystem:**

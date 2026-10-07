@@ -55,11 +55,13 @@ make test-usercopy      # copy_from/to_user against NULL, kernel, unmapped,
                         #   wrapping, cross-page and read-only pointers
 make test-faults        # user page fault, #GP from cli/outb/int, RO text page
 make test-stdio         # fd 0/1/2, blocking read, EMFILE, fd reuse
-make test-fs            # open/read/write/lseek/stat/mkdir/unlink/readdir
+make test-fs            # open/read/write/lseek/stat/mkdir/unlink/readdir,
+                        #   plus a 1.5 MiB file across the indirect blocks
 make test-shell         # the user shell's filesystem commands
 make test-pipe          # pipes: round trip, EOF, full buffer
 make test-proc          # spawn/wait/kill/zombies/orphans, frame-leak check
 make test-exec          # VBIN loading, malformed images, exec(), argv and fd rules
+make test-persist       # write a file, reboot on the same image, read it back
 ```
 
 `tests/run.sh <suite>` boots QEMU headless, types commands into the **user**

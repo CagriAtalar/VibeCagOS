@@ -47,6 +47,7 @@ return in EAX; negative = -errno
 | 26 | PIPE | int fds[2] | → 0; fds[0]=read, fds[1]=write |
 | 27 | EXEC | path, argv | replaces address space; returns only on failure |
 | 28 | SPAWNFDS | name, argv, in, out, err | like SPAWN; child fds 0/1/2 from caller's descriptors (`-1` = closed) |
+| 29 | TRUNCATE | path, size | set file size, freeing the blocks dropped from the end |
 
 ## File descriptors
 

@@ -25,6 +25,7 @@ static inline int sys_fstat(int fd, struct vibe_stat *st)    { return syscall3(S
 static inline int sys_mkdir(const char *p, int mode)         { return syscall3(SYS_MKDIR, (u32)p, (u32)mode, 0); }
 static inline int sys_unlink(const char *p)                  { return syscall3(SYS_UNLINK, (u32)p, 0, 0); }
 static inline int sys_rmdir(const char *p)                   { return syscall3(SYS_RMDIR, (u32)p, 0, 0); }
+static inline int sys_truncate(const char *p, u32 sz)        { return syscall3(SYS_TRUNCATE, (u32)p, sz, 0); }
 static inline int sys_lseek(int fd, int off, int wh)         { return syscall3(SYS_LSEEK, (u32)fd, (u32)off, (u32)wh); }
 static inline int sys_readdir(int fd, struct vibe_dirent *d, u32 max) { return syscall3(SYS_READDIR, (u32)fd, (u32)d, max); }
 static inline int sys_spawn(const char *name, const char *const *argv) { return syscall3(SYS_SPAWN, (u32)name, (u32)argv, 0); }

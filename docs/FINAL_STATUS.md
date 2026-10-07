@@ -1,7 +1,7 @@
 # VibeCagOS — Feature Status
 
 > **Updated:** 2026-10-07 · **Build:** clang/lld, 0 warnings · **Tests:**
-> `make test-all`, 11 suites, 0 failures
+> `make test-all`, 12 suites, 0 failures
 >
 > Every row below was read out of the source or asserted by a test. Where a
 > feature exists but is incomplete, it says so.
@@ -60,7 +60,7 @@
 
 | Feature | State | Notes |
 |---|---|---|
-| `int 0x80` dispatcher with a central ABI header | done | 28 syscalls (`SYS_MAX`), `src/abi/syscall.h` |
+| `int 0x80` dispatcher with a central ABI header | done | 29 syscalls (`SYS_MAX`), `src/abi/syscall.h` |
 | Validated `copy_from_user` / `copy_to_user` / `strncpy_from_user` | done | per-page checks, no partial copies |
 | Unknown syscall → `-ENOSYS`, bad fd → `-EBADF` | done | |
 | Errors as `-errno` | done | VFS errors translated in `sysfile.c` |
@@ -70,13 +70,13 @@
 | Feature | State | Notes |
 |---|---|---|
 | VFS with mount table and vnodes | done | |
-| VibeFS: inodes, directories, `.`/`..`, 60 KiB max file | done | on the IDE disk (PIO) |
+| VibeFS: inodes, directories, `.`/`..`, ~8 MiB max file | done | on the IDE disk (PIO); direct + single + double indirect |
 | procfs (`/proc/*`) | done | tasks, meminfo, uptime, dmesg, pci, devices, date |
 | devfs (`/dev/*`) | done | null, zero, console, random, tty |
 | PS/2 keyboard IRQ1 → ring buffer → blocking `read` | done | |
 | PIT 100 Hz, PIC remap | done | |
 | Permission enforcement in VibeFS | not done | `mode` stored, not checked |
-| Indirect blocks / large files | not done | 60 KiB ceiling |
+| Indirect blocks / large files | done | single + double indirect; a 1.5 MiB file is written/read/truncated in `test-fs` (`T28`) |
 
 ## Programs
 
@@ -105,9 +105,10 @@
 
 ## Test coverage
 
-11 suites, run headless against the serial console: `ring3`, `syscall`,
+12 suites, run headless against the serial console: `ring3`, `syscall`,
 `scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `pipe`, `proc`,
-`exec`. They assert privilege level, register state, preemption without yield,
-pointer validation, page-fault containment, fd semantics, filesystem round
-trips, pipelines, zombie/orphan lifetime and VBIN/exec behaviour — not just that
-the OS boots.
+`exec`, `persist` (two boots on one image). They assert privilege level,
+register state, preemption without yield, pointer validation, page-fault
+containment, fd semantics, filesystem round trips, reboot persistence,
+pipelines, zombie/orphan lifetime and VBIN/exec behaviour — not just that the
+OS boots.

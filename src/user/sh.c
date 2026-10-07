@@ -280,7 +280,7 @@ static void execute(char *line) {
 int user_main(int argc, char **argv) {
     (void)argc; (void)argv;
     char line[LINE_MAX], cwd[256];
-    uputs(1, "\nVibeCagOS 0.5.0 user shell (Ring 3) ready. Type 'help' for commands.\n\n");
+    uputs(1, "\nVibeCagOS 0.6.0 user shell (Ring 3) ready. Type 'help' for commands.\n\n");
     for (;;) {
         if (sys_getcwd(cwd, sizeof(cwd)) < 0) strcpy(cwd, "?");
         uprintf(1, "vcos:%s$ ", cwd);

@@ -11,6 +11,7 @@ int sys_fstat(uint32_t fd, void *ustat);
 int sys_mkdir(const char *upath, uint32_t mode);
 int sys_unlink(const char *upath);
 int sys_rmdir(const char *upath);
+int sys_truncate(const char *upath, uint32_t size);
 int sys_lseek(uint32_t fd, int off, uint32_t whence);
 int sys_pipe(int *ufds);            /* creates fds[0]=read, fds[1]=write end */
 int sys_readdir(uint32_t fd, void *udirent, uint32_t max);

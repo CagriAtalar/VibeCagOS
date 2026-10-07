@@ -31,6 +31,7 @@
 | 14b | Ring-3 init + disk-first loading | done | `/sbin/init` spawns `/bin/sh`; bare names try `/bin` first |
 | 14c | All non-control commands moved to `/bin` | done | `test-shell` (`ps`, `pwd`, `mkdir`, … are programs) |
 | 15 | GUI foundation (framebuffer, input, IPC) | **next** | — |
+| 16 | VibeFS large files (single + double indirect) | done | `test-fs` (`T28`: 1.5 MiB write/read/overwrite/truncate) |
 | 16 | Compositor / window manager / apps | not started | — |
 
 ## Next: milestone 15 — GUI foundation
@@ -67,6 +68,9 @@ desktop) is legacy and should be deleted once the user-space server works.
   `ps`, `head`, `hexdump`, `pwd`, `touch`, `write`, `clear`, `sleep`, `kill`,
   `uname`, `uptime` are `/bin` programs; only `cd`, `exit`, `exec`, `wait`,
   `help` remain builtins because they change shell state.
+- **Large filesystem files**: done — VibeFS now has single- and double-indirect
+  blocks (~8 MiB per file) and a maintained free-block bitmap; `SYS_TRUNCATE`
+  frees the dropped tail through all three levels. See `docs/FILESYSTEM.md`.
 - **Stop embedding binaries in the kernel** (defect 3 in the audit): build a
   populated `disk.img` so `/bin` is the only source of programs.
 - **Security hardening**: honour `mode` in VibeFS, `NX` once PAE is on, per-user

@@ -44,7 +44,7 @@ extern struct process procs[];
 extern paddr_t next_paddr;
 extern char __free_ram[], __free_ram_end[];
 
-#define VIBECAGOS_VERSION "0.5.0"
+#define VIBECAGOS_VERSION "0.6.0"
 
 /* =========================================================================
  * Content generation buffer

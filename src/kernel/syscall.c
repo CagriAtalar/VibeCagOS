@@ -49,6 +49,7 @@ void syscall_dispatch(struct trap_frame *f) {
     case SYS_MKDIR:   ret = sys_mkdir((const char *)a1, a2);     break;
     case SYS_UNLINK:  ret = sys_unlink((const char *)a1);        break;
     case SYS_RMDIR:   ret = sys_rmdir((const char *)a1);         break;
+    case SYS_TRUNCATE: ret = sys_truncate((const char *)a1, a2);  break;
     case SYS_LSEEK:   ret = sys_lseek(a1, (int)a2, a3);          break;
     case SYS_READDIR: ret = sys_readdir(a1, (void *)a2, a3);     break;
     case SYS_SPAWN:   ret = sys_spawn((const char *)a1, (const char *const *)a2); break;

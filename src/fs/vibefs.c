@@ -142,46 +142,220 @@ static void vibefs_inode_free(uint32_t ino) {
 
 /* =========================================================================
  * Block allocation / freeing
+ *
+ * The set of used data sectors lives in vibefs.block_bitmap, rebuilt once at
+ * mount from the inode table and kept in sync by the two functions below.
  * ========================================================================= */
 
-/* Build a bitmap of used data sectors from all live inodes.
-   Returns the sector number of a free data block, or 0 if full. */
-static uint32_t vibefs_alloc_block(void) {
-    /* Mark used blocks */
-    static bool used[VIBEFS_DATA_SECTORS];
-    memset(used, 0, sizeof(used));
-    if (vibefs.sb.free_blocks == 0) return 0;   /* cheap early out */
+static inline bool blk_used(uint32_t idx) {
+    return (vibefs.block_bitmap[idx >> 3] >> (idx & 7)) & 1u;
+}
+static inline void blk_mark(uint32_t idx) {
+    vibefs.block_bitmap[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+}
+static inline void blk_unmark(uint32_t idx) {
+    vibefs.block_bitmap[idx >> 3] &= (uint8_t)~(1u << (idx & 7));
+}
+static inline bool blk_in_range(uint32_t blk) {
+    return blk >= VIBEFS_DATA_START && (blk - VIBEFS_DATA_START) < VIBEFS_DATA_SECTORS;
+}
 
-    for (uint32_t i = 1; i < VIBEFS_MAX_INODES; i++) {
-        if (vibefs.inodes[i].ino == 0) continue;
-        for (int j = 0; j < (int)VIBEFS_INODE_BLOCKS; j++) {
-            uint32_t blk = vibefs.inodes[i].blocks[j];
-            if (blk == 0) continue;
-            if (blk >= VIBEFS_DATA_START) {
-                uint32_t idx = blk - VIBEFS_DATA_START;
-                if (idx < VIBEFS_DATA_SECTORS)
-                    used[idx] = true;
-            }
-        }
+/* Read the VIBEFS_PTRS_PER_BLOCK pointers held in one indirect block. */
+static void read_ptrs(uint32_t sector, uint32_t *out) {
+    disk_read(sector, out);
+}
+
+/* Mark one inode's direct blocks and every block reachable through its
+ * indirect blocks. */
+static void mark_inode_blocks(const struct vibefs_inode *inode) {
+    const uint32_t per = VIBEFS_PTRS_PER_BLOCK;
+    static uint32_t l1[VIBEFS_PTRS_PER_BLOCK];
+    static uint32_t l2[VIBEFS_PTRS_PER_BLOCK];
+
+    for (uint32_t j = 0; j < VIBEFS_NDIRECT; j++)
+        if (blk_in_range(inode->blocks[j]))
+            blk_mark(inode->blocks[j] - VIBEFS_DATA_START);
+
+    if (blk_in_range(inode->blocks[VIBEFS_SIND_INDEX])) {
+        uint32_t ind = inode->blocks[VIBEFS_SIND_INDEX];
+        blk_mark(ind - VIBEFS_DATA_START);
+        read_ptrs(ind, l1);
+        for (uint32_t k = 0; k < per; k++)
+            if (blk_in_range(l1[k])) blk_mark(l1[k] - VIBEFS_DATA_START);
     }
 
-    for (uint32_t i = 0; i < VIBEFS_DATA_SECTORS; i++) {
-        if (!used[i]) {
+    if (blk_in_range(inode->blocks[VIBEFS_DIND_INDEX])) {
+        uint32_t dind = inode->blocks[VIBEFS_DIND_INDEX];
+        blk_mark(dind - VIBEFS_DATA_START);
+        read_ptrs(dind, l1);
+        for (uint32_t d = 0; d < per; d++) {
+            if (!blk_in_range(l1[d])) continue;
+            blk_mark(l1[d] - VIBEFS_DATA_START);
+            read_ptrs(l1[d], l2);           /* separate buffer: l1 is the loop */
+            for (uint32_t e = 0; e < per; e++)
+                if (blk_in_range(l2[e])) blk_mark(l2[e] - VIBEFS_DATA_START);
+        }
+    }
+}
+
+/* Rebuild the used-block bitmap and the free-block count from the in-memory
+ * inode table. Also self-heals sb.free_blocks after an unclean shutdown. */
+static void vibefs_rebuild_bitmap(void) {
+    memset(vibefs.block_bitmap, 0, sizeof(vibefs.block_bitmap));
+    for (uint32_t i = 1; i < VIBEFS_MAX_INODES; i++)
+        if (vibefs.inodes[i].ino != 0)
+            mark_inode_blocks(&vibefs.inodes[i]);
+
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < VIBEFS_DATA_SECTORS; i++)
+        if (blk_used(i)) used++;
+    vibefs.sb.free_blocks = VIBEFS_DATA_SECTORS - used;
+    vibefs.alloc_hint = 0;
+}
+
+/* Reserve a free data block; returns its sector number, or 0 if the disk is
+ * full. */
+static uint32_t vibefs_alloc_block(void) {
+    if (vibefs.sb.free_blocks == 0) return 0;   /* cheap early out */
+    for (uint32_t n = 0; n < VIBEFS_DATA_SECTORS; n++) {
+        uint32_t idx = (vibefs.alloc_hint + n) % VIBEFS_DATA_SECTORS;
+        if (!blk_used(idx)) {
+            blk_mark(idx);
             vibefs.sb.free_blocks--;
-            return VIBEFS_DATA_START + i;
+            vibefs.alloc_hint = (idx + 1 < VIBEFS_DATA_SECTORS) ? idx + 1 : 0;
+            return VIBEFS_DATA_START + idx;
         }
     }
     return 0;  /* Disk full */
 }
 
-/* Free all data blocks belonging to an inode */
-static void vibefs_inode_free_blocks(struct vibefs_inode *inode) {
-    for (int i = 0; i < (int)VIBEFS_INODE_BLOCKS; i++) {
-        if (inode->blocks[i] != 0) {
-            vibefs.sb.free_blocks++;
-            inode->blocks[i] = 0;
-        }
+static void vibefs_free_block(uint32_t blk) {
+    if (!blk_in_range(blk)) return;
+    uint32_t idx = blk - VIBEFS_DATA_START;
+    if (blk_used(idx)) {
+        blk_unmark(idx);
+        vibefs.sb.free_blocks++;
     }
+}
+
+/* Free all data blocks belonging to an inode, including indirect metadata. */
+static void vibefs_inode_free_blocks(struct vibefs_inode *inode) {
+    const uint32_t per = VIBEFS_PTRS_PER_BLOCK;
+    static uint32_t l1[VIBEFS_PTRS_PER_BLOCK];
+    static uint32_t l2[VIBEFS_PTRS_PER_BLOCK];
+
+    for (uint32_t j = 0; j < VIBEFS_NDIRECT; j++) {
+        vibefs_free_block(inode->blocks[j]);
+        inode->blocks[j] = 0;
+    }
+    if (inode->blocks[VIBEFS_SIND_INDEX]) {
+        uint32_t ind = inode->blocks[VIBEFS_SIND_INDEX];
+        read_ptrs(ind, l1);
+        for (uint32_t k = 0; k < per; k++) vibefs_free_block(l1[k]);
+        vibefs_free_block(ind);
+        inode->blocks[VIBEFS_SIND_INDEX] = 0;
+    }
+    if (inode->blocks[VIBEFS_DIND_INDEX]) {
+        uint32_t dind = inode->blocks[VIBEFS_DIND_INDEX];
+        read_ptrs(dind, l1);
+        for (uint32_t d = 0; d < per; d++) {
+            if (l1[d] == 0) continue;
+            read_ptrs(l1[d], l2);
+            for (uint32_t e = 0; e < per; e++) vibefs_free_block(l2[e]);
+            vibefs_free_block(l1[d]);
+        }
+        vibefs_free_block(dind);
+        inode->blocks[VIBEFS_DIND_INDEX] = 0;
+    }
+}
+
+/*
+ * Map a file's logical block number to a disk sector, allocating the block
+ * (and any indirect block that addresses it) when `alloc` is set. Returns 0
+ * when the block does not exist and allocation is off, or on ENOSPC. If
+ * `is_new` is non-NULL it is set to 1 when the returned data block was just
+ * allocated, so the writer knows it need not read stale contents.
+ */
+static uint32_t vibefs_bmap(struct vibefs_inode *inode, uint32_t lbn,
+                            int alloc, int *is_new) {
+    const uint32_t per = VIBEFS_PTRS_PER_BLOCK;
+    static const uint32_t zero_blk[VIBEFS_PTRS_PER_BLOCK];
+    static uint32_t l1[VIBEFS_PTRS_PER_BLOCK];
+    static uint32_t l2[VIBEFS_PTRS_PER_BLOCK];
+    if (is_new) *is_new = 0;
+
+    /* direct */
+    if (lbn < VIBEFS_NDIRECT) {
+        uint32_t b = inode->blocks[lbn];
+        if (b == 0 && alloc) {
+            b = vibefs_alloc_block();
+            if (b == 0) return 0;
+            inode->blocks[lbn] = b;
+            if (is_new) *is_new = 1;
+        }
+        return b;
+    }
+
+    uint32_t i = lbn - VIBEFS_NDIRECT;
+
+    /* single indirect */
+    if (i < per) {
+        uint32_t ind = inode->blocks[VIBEFS_SIND_INDEX];
+        if (ind == 0) {
+            if (!alloc) return 0;
+            ind = vibefs_alloc_block();
+            if (ind == 0) return 0;
+            disk_write(ind, zero_blk);
+            inode->blocks[VIBEFS_SIND_INDEX] = ind;
+        }
+        read_ptrs(ind, l1);
+        uint32_t b = l1[i];
+        if (b == 0 && alloc) {
+            b = vibefs_alloc_block();
+            if (b == 0) return 0;
+            l1[i] = b;
+            disk_write(ind, l1);
+            if (is_new) *is_new = 1;
+        }
+        return b;
+    }
+
+    i -= per;
+
+    /* double indirect */
+    if (i < per * per) {
+        uint32_t d = i / per, e = i % per;
+        uint32_t dind = inode->blocks[VIBEFS_DIND_INDEX];
+        if (dind == 0) {
+            if (!alloc) return 0;
+            dind = vibefs_alloc_block();
+            if (dind == 0) return 0;
+            disk_write(dind, zero_blk);
+            inode->blocks[VIBEFS_DIND_INDEX] = dind;
+        }
+        read_ptrs(dind, l1);
+        uint32_t child = l1[d];
+        if (child == 0) {
+            if (!alloc) return 0;
+            child = vibefs_alloc_block();
+            if (child == 0) return 0;
+            disk_write(child, zero_blk);
+            l1[d] = child;
+            disk_write(dind, l1);
+        }
+        read_ptrs(child, l2);
+        uint32_t b = l2[e];
+        if (b == 0 && alloc) {
+            b = vibefs_alloc_block();
+            if (b == 0) return 0;
+            l2[e] = b;
+            disk_write(child, l2);
+            if (is_new) *is_new = 1;
+        }
+        return b;
+    }
+
+    return 0;   /* beyond VIBEFS_MAX_FILE_SIZE */
 }
 
 /* =========================================================================
@@ -196,7 +370,7 @@ static uint32_t vibefs_dir_find(struct vibefs_inode *dir, const char *name,
                                  uint8_t *type_out) {
     static char sector_buf[VIBEFS_BLOCK_SIZE];
 
-    for (int blk = 0; blk < (int)VIBEFS_INODE_BLOCKS; blk++) {
+    for (int blk = 0; blk < (int)VIBEFS_NDIRECT; blk++) {
         if (dir->blocks[blk] == 0) break;
         disk_read(dir->blocks[blk], sector_buf);
 
@@ -220,7 +394,7 @@ static int vibefs_dir_add_entry(struct vibefs_inode *dir, const char *name,
     static char sector_buf[VIBEFS_BLOCK_SIZE];
 
     /* Search for a free slot in existing blocks */
-    for (int blk = 0; blk < (int)VIBEFS_INODE_BLOCKS; blk++) {
+    for (int blk = 0; blk < (int)VIBEFS_NDIRECT; blk++) {
         if (dir->blocks[blk] == 0) {
             /* Need a new block */
             uint32_t new_sector = vibefs_alloc_block();
@@ -257,7 +431,7 @@ static int vibefs_dir_add_entry(struct vibefs_inode *dir, const char *name,
 static int vibefs_dir_remove_entry(struct vibefs_inode *dir, const char *name) {
     static char sector_buf[VIBEFS_BLOCK_SIZE];
 
-    for (int blk = 0; blk < (int)VIBEFS_INODE_BLOCKS; blk++) {
+    for (int blk = 0; blk < (int)VIBEFS_NDIRECT; blk++) {
         if (dir->blocks[blk] == 0) break;
         disk_read(dir->blocks[blk], sector_buf);
 
@@ -281,7 +455,7 @@ static int vibefs_dir_remove_entry(struct vibefs_inode *dir, const char *name) {
 static bool vibefs_dir_is_empty(struct vibefs_inode *dir) {
     static char sector_buf[VIBEFS_BLOCK_SIZE];
 
-    for (int blk = 0; blk < (int)VIBEFS_INODE_BLOCKS; blk++) {
+    for (int blk = 0; blk < (int)VIBEFS_NDIRECT; blk++) {
         if (dir->blocks[blk] == 0) break;
         disk_read(dir->blocks[blk], sector_buf);
 
@@ -336,8 +510,10 @@ void vibefs_format(void) {
 
     disk_write(0, &vibefs.sb);
 
-    /* Zero inode table */
+    /* Zero inode table and the in-memory block bitmap */
     memset(vibefs.inodes, 0, sizeof(vibefs.inodes));
+    memset(vibefs.block_bitmap, 0, sizeof(vibefs.block_bitmap));
+    vibefs.alloc_hint = 0;
 
     /* Create root directory */
     vibefs_create_root();
@@ -352,7 +528,7 @@ void vibefs_format(void) {
     printf("VibeFS: Format complete.\n");
     printf("  Max inodes   : %u\n", VIBEFS_MAX_INODES);
     printf("  Data sectors : %u\n", VIBEFS_DATA_SECTORS);
-    printf("  Max file size: %u bytes\n", VIBEFS_INODE_BLOCKS * VIBEFS_BLOCK_SIZE);
+    printf("  Max file size: %u bytes\n", (unsigned)VIBEFS_MAX_FILE_SIZE);
 }
 
 int vibefs_mount(void) {
@@ -368,12 +544,16 @@ int vibefs_mount(void) {
     }
 
     if (vibefs.sb.version != VIBEFS_VERSION) {
-        printf("VibeFS: Version mismatch (%u vs %u)\n",
+        /* The on-disk inode layout changed between versions; a v1 image is not
+         * safe to read with v2 block-map code, so start fresh. */
+        printf("VibeFS: Version %u != %u, reformatting\n",
                vibefs.sb.version, VIBEFS_VERSION);
-        return -1;
+        vibefs_format();
+        return 0;
     }
 
     read_inode_table();
+    vibefs_rebuild_bitmap();
     vibefs.mounted = true;
     vibefs.dirty   = false;
 
@@ -556,10 +736,10 @@ static int vibefs_vfs_read(struct vnode *vn, void *buf, size_t len,
         uint32_t blk_idx = cur_off / VIBEFS_BLOCK_SIZE;
         uint32_t blk_off = cur_off % VIBEFS_BLOCK_SIZE;
 
-        if (blk_idx >= VIBEFS_INODE_BLOCKS) break;
-        if (inode->blocks[blk_idx] == 0) break;
+        uint32_t blk = vibefs_bmap(inode, blk_idx, 0, NULL);
+        if (blk == 0) break;
 
-        disk_read(inode->blocks[blk_idx], blk_buf);
+        disk_read(blk, blk_buf);
 
         size_t chunk = VIBEFS_BLOCK_SIZE - blk_off;
         if (chunk > to_read - done) chunk = to_read - done;
@@ -580,7 +760,7 @@ static int vibefs_vfs_write(struct vnode *vn, const void *buf, size_t len,
     if (inode->type == VFS_TYPE_DIR) return VFS_EISDIR;
 
     /* Check capacity */
-    uint32_t max_size = VIBEFS_INODE_BLOCKS * VIBEFS_BLOCK_SIZE;
+    uint32_t max_size = VIBEFS_MAX_FILE_SIZE;
     if (off >= max_size) return VFS_ENOSPC;
     if (off + (uint32_t)len > max_size) len = max_size - off;
 
@@ -592,23 +772,24 @@ static int vibefs_vfs_write(struct vnode *vn, const void *buf, size_t len,
         uint32_t blk_idx = cur_off / VIBEFS_BLOCK_SIZE;
         uint32_t blk_off = cur_off % VIBEFS_BLOCK_SIZE;
 
-        if (blk_idx >= VIBEFS_INODE_BLOCKS) break;
-
-        /* Allocate block if needed */
-        if (inode->blocks[blk_idx] == 0) {
-            uint32_t new_blk = vibefs_alloc_block();
-            if (new_blk == 0) break;
-            inode->blocks[blk_idx] = new_blk;
-            memset(blk_buf, 0, sizeof(blk_buf));
-        } else {
-            disk_read(inode->blocks[blk_idx], blk_buf);
-        }
-
         size_t chunk = VIBEFS_BLOCK_SIZE - blk_off;
         if (chunk > len - done) chunk = len - done;
 
+        int is_new = 0;
+        uint32_t blk = vibefs_bmap(inode, blk_idx, 1, &is_new);
+        if (blk == 0) break;
+
+        /* A whole-block overwrite needs neither a read nor a zero-fill. A
+         * freshly allocated partial block must start from zeros so its tail
+         * does not expose another file's old data. */
+        int full = (blk_off == 0 && chunk == VIBEFS_BLOCK_SIZE);
+        if (!full) {
+            if (is_new) memset(blk_buf, 0, sizeof(blk_buf));
+            else        disk_read(blk, blk_buf);
+        }
+
         memcpy(blk_buf + blk_off, (const uint8_t *)buf + done, chunk);
-        disk_write(inode->blocks[blk_idx], blk_buf);
+        disk_write(blk, blk_buf);
 
         done    += chunk;
         cur_off += (uint32_t)chunk;
@@ -636,7 +817,7 @@ static int vibefs_vfs_readdir(struct vnode *dir, struct dirent *entries,
     uint32_t entry_idx = *pos;  /* Global entry index across all blocks */
     static char blk_buf[VIBEFS_BLOCK_SIZE];
 
-    for (int blk = 0; blk < (int)VIBEFS_INODE_BLOCKS && count < max; blk++) {
+    for (int blk = 0; blk < (int)VIBEFS_NDIRECT && count < max; blk++) {
         if (inode->blocks[blk] == 0) break;
         disk_read(inode->blocks[blk], blk_buf);
 
@@ -675,23 +856,92 @@ static int vibefs_vfs_stat(struct vnode *vn, struct vstat *st) {
     return VFS_OK;
 }
 
+/*
+ * truncate_blocks — free every block at or beyond logical block `keep`,
+ * walking the direct, single-indirect and double-indirect levels and dropping
+ * indirect metadata that becomes empty.
+ */
+static void truncate_blocks(struct vibefs_inode *inode, uint32_t keep) {
+    const uint32_t per = VIBEFS_PTRS_PER_BLOCK;
+    static uint32_t l1[VIBEFS_PTRS_PER_BLOCK];
+    static uint32_t l2[VIBEFS_PTRS_PER_BLOCK];
+
+    /* direct */
+    uint32_t from = keep < VIBEFS_NDIRECT ? keep : VIBEFS_NDIRECT;
+    for (uint32_t j = from; j < VIBEFS_NDIRECT; j++) {
+        vibefs_free_block(inode->blocks[j]);
+        inode->blocks[j] = 0;
+    }
+
+    /* single indirect */
+    if (inode->blocks[VIBEFS_SIND_INDEX]) {
+        uint32_t ind = inode->blocks[VIBEFS_SIND_INDEX];
+        read_ptrs(ind, l1);
+        /* Index within the single-indirect block of the first block to free.
+         * It covers logical blocks [NDIRECT, NDIRECT+per); first==0 means all
+         * of it is beyond `keep`, first>=per means none of it is. */
+        uint32_t first = keep > VIBEFS_NDIRECT ? keep - VIBEFS_NDIRECT : 0;
+        if (first == 0) {
+            for (uint32_t k = 0; k < per; k++) vibefs_free_block(l1[k]);
+            vibefs_free_block(ind);
+            inode->blocks[VIBEFS_SIND_INDEX] = 0;
+        } else if (first < per) {
+            bool changed = false;
+            for (uint32_t k = first; k < per; k++)
+                if (l1[k]) { vibefs_free_block(l1[k]); l1[k] = 0; changed = true; }
+            if (changed) disk_write(ind, l1);
+        }
+        /* first >= per: everything in the single-indirect block is kept */
+    }
+
+    /* double indirect */
+    if (inode->blocks[VIBEFS_DIND_INDEX]) {
+        uint32_t dind = inode->blocks[VIBEFS_DIND_INDEX];
+        read_ptrs(dind, l1);
+        uint32_t base = VIBEFS_NDIRECT + per;   /* first logical block of dind */
+        if (keep <= base) {
+            for (uint32_t d = 0; d < per; d++) {
+                if (l1[d] == 0) continue;
+                read_ptrs(l1[d], l2);
+                for (uint32_t e = 0; e < per; e++) vibefs_free_block(l2[e]);
+                vibefs_free_block(l1[d]);
+            }
+            vibefs_free_block(dind);
+            inode->blocks[VIBEFS_DIND_INDEX] = 0;
+        } else {
+            uint32_t off = keep - base;          /* first double index to free */
+            uint32_t d0 = off / per, e0 = off % per;
+            bool changed = false;
+            for (uint32_t d = d0; d < per; d++) {
+                if (l1[d] == 0) continue;
+                uint32_t child = l1[d];
+                read_ptrs(child, l2);
+                uint32_t first = (d == d0) ? e0 : 0;
+                for (uint32_t e = first; e < per; e++)
+                    if (l2[e]) { vibefs_free_block(l2[e]); l2[e] = 0; }
+                if (first == 0) {                /* the whole child is gone */
+                    vibefs_free_block(child);
+                    l1[d] = 0;
+                } else {
+                    disk_write(child, l2);
+                }
+                changed = true;
+            }
+            if (changed) disk_write(dind, l1);
+        }
+    }
+}
+
 static int vibefs_vfs_truncate(struct vnode *vn, uint32_t size) {
     if (!vibefs.mounted) return VFS_EIO;
 
     struct vibefs_inode *inode = &vibefs.inodes[vn->ino];
     if (inode->type == VFS_TYPE_DIR) return VFS_EISDIR;
 
-    if (size > VIBEFS_INODE_BLOCKS * VIBEFS_BLOCK_SIZE)
-        return VFS_EINVAL;
+    if (size > VIBEFS_MAX_FILE_SIZE) return VFS_EINVAL;
 
-    /* Free blocks beyond new size */
-    uint32_t last_blk = size == 0 ? 0 : (size - 1) / VIBEFS_BLOCK_SIZE + 1;
-    for (uint32_t i = last_blk; i < VIBEFS_INODE_BLOCKS; i++) {
-        if (inode->blocks[i] != 0) {
-            vibefs.sb.free_blocks++;
-            inode->blocks[i] = 0;
-        }
-    }
+    uint32_t keep = size == 0 ? 0 : (size - 1) / VIBEFS_BLOCK_SIZE + 1;
+    truncate_blocks(inode, keep);
 
     inode->size = size;
     vn->size    = size;

@@ -377,6 +377,14 @@ int sys_rmdir(const char *upath) {
     return vfs_err(vfs_rmdir(path));
 }
 
+/* Change a file's size, freeing the blocks that fall off the end. */
+int sys_truncate(const char *upath, uint32_t size) {
+    char path[VFS_PATH_MAX];
+    int r = get_path(upath, path);
+    if (r < 0) return r;
+    return vfs_err(vfs_truncate(path, size));
+}
+
 /* Returns 1 and fills *udirent, or 0 at end of directory. */
 int sys_readdir(uint32_t fd, void *udirent, uint32_t max) {
     struct fdent *e = fd_get(fd);

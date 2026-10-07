@@ -32,7 +32,8 @@
  * Features:
  *   - Arbitrary directory depth
  *   - Up to VIBEFS_MAX_INODES files/directories total
- *   - Direct blocks only (VIBEFS_INODE_BLOCKS * 512 bytes per file)
+ *   - Direct + single-indirect + double-indirect blocks (see VIBEFS_NDIRECT
+ *     and friends); a file may span up to VIBEFS_MAX_FILE_SIZE bytes
  *   - Persistent via IDE disk
  *
  * Known limitations:
@@ -40,7 +41,7 @@
  *   - No hard links (nlink always 1)
  *   - No timestamps
  *   - No permissions enforcement (mode stored but not checked)
- *   - Maximum file size: VIBEFS_INODE_BLOCKS * 512 bytes
+ *   - Maximum file size: VIBEFS_MAX_FILE_SIZE (~8 MiB)
  */
 
 /* =========================================================================
@@ -48,24 +49,35 @@
  * ========================================================================= */
 
 #define VIBEFS_MAGIC           0x56494245u   /* "VIBE" */
-#define VIBEFS_VERSION         1u
+#define VIBEFS_VERSION         2u            /* v2: direct + single + double indirect */
 
 #define VIBEFS_BLOCK_SIZE      512u          /* Must match sector size */
 #define VIBEFS_MAX_INODES      128u          /* Inode table capacity */
 #define VIBEFS_ROOT_INO        1u            /* Root directory inode */
 
 /*
- * Direct block pointers per inode. The inode struct is padded to exactly one
- * sector (see struct vibefs_inode) so INODES_PER_SECTOR is 1 and a sector
- * never straddles two inodes - that keeps the inode table I/O trivial.
+ * Block map. An inode is padded to exactly one sector (so INODES_PER_SECTOR is
+ * 1 and a sector never straddles two inodes), which fits 120 u32 slots after
+ * the 15 bytes of scalar fields. Those slots are split:
  *
- *   max file size = VIBEFS_INODE_BLOCKS * 512 = 120 * 512 = 60 KiB
+ *   blocks[0   .. 117]   118 direct data blocks
+ *   blocks[118]          single-indirect block  (VIBEFS_PTRS_PER_BLOCK pointers)
+ *   blocks[119]          double-indirect block  (VIBEFS_PTRS_PER_BLOCK^2 pointers)
  *
- * 60 KiB is what makes VBIN user programs storable: sh is ~12 KiB and
- * utest.elf ~29 KiB, and both have to fit in a single file for exec() to be
- * able to read them in one go.
+ *   max file size = (118 + 128 + 128*128) * 512 = 8,514,560 bytes (~8 MiB)
+ *
+ * Directories only ever use the direct range: they stop at the first zero
+ * pointer and never allocate an indirect block, so 118 direct blocks (944
+ * directory entries) is their limit. Files use all three levels.
  */
-#define VIBEFS_INODE_BLOCKS    120u
+#define VIBEFS_INODE_BLOCKS    120u          /* total slots (inode stays 1 sector) */
+#define VIBEFS_NDIRECT         118u          /* direct data blocks */
+#define VIBEFS_PTRS_PER_BLOCK  (VIBEFS_BLOCK_SIZE / 4u)   /* 128 */
+#define VIBEFS_SIND_INDEX      VIBEFS_NDIRECT              /* 118 */
+#define VIBEFS_DIND_INDEX      (VIBEFS_NDIRECT + 1u)       /* 119 */
+#define VIBEFS_MAX_FILE_SIZE \
+    ((VIBEFS_NDIRECT + VIBEFS_PTRS_PER_BLOCK + \
+      VIBEFS_PTRS_PER_BLOCK * VIBEFS_PTRS_PER_BLOCK) * VIBEFS_BLOCK_SIZE)
 #define VIBEFS_MAX_FILENAME    55u           /* Bytes, excludes null terminator */
 #define VIBEFS_DIRENT_SIZE     64u           /* Must be power of two */
 #define VIBEFS_DIRENTS_PER_BLK (VIBEFS_BLOCK_SIZE / VIBEFS_DIRENT_SIZE)  /* 8 */
@@ -79,8 +91,9 @@
 /* First data sector */
 #define VIBEFS_DATA_START (1u + VIBEFS_INODE_SECTORS)
 
-/* The disk image is 2 MiB = 4096 sectors (see Makefile's disk.img target). */
-#define VIBEFS_TOTAL_SECTORS   4096u
+/* The disk image is 16 MiB = 32768 sectors (see Makefile's disk.img target,
+ * which recreates the file when its size does not match). */
+#define VIBEFS_TOTAL_SECTORS   32768u
 
 /* Everything after the superblock and the inode table is data. Derived, not
  * hard-coded: the inode table grew when VIBEFS_INODE_BLOCKS grew, and a stale
@@ -141,6 +154,12 @@ struct vibefs_dirent {
 struct vibefs_state {
     struct vibefs_superblock sb;
     struct vibefs_inode      inodes[VIBEFS_MAX_INODES];
+    /* Used-data-sector bitset, one bit per data sector. Rebuilt at mount from
+     * the inode table and kept in sync by vibefs_alloc_block/free_block; it is
+     * never stored on disk. Recomputing it on every allocation (as the
+     * direct-only version did) does not scale once files have indirect blocks. */
+    uint8_t                  block_bitmap[(VIBEFS_DATA_SECTORS + 7u) / 8u];
+    uint32_t                 alloc_hint;  /* first sector to try next */
     bool                     mounted;
     bool                     dirty;       /* inodes need flushing */
 };

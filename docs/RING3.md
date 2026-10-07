@@ -56,9 +56,10 @@ wrap-around, PDE+PTE present, `USER` bit and `WRITABLE` (for writes) for
 
 ## Tests (`make test-all`)
 
-`tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs|shell|proc|exec>`
+`tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs|shell|pipe|proc|exec>`
 boots QEMU headless, drives the user shell over serial and greps the log. Test
-programs: `src/user/utest.c`.
+programs: `src/user/utest.c`. `tests/persist.sh` is the only two-boot suite: it
+writes a file, reboots on the same disk image and checks it is still there.
 
 ## File descriptors (M8/M9)
 
@@ -187,8 +188,9 @@ programs exist as ordinary files on a plain `disk.img`.
 
 ## Known limits
 
-* VibeFS caps files at 60 KiB (120 direct blocks); larger executables need
-  indirect blocks.
+* VibeFS files use direct, single-indirect and double-indirect blocks, so a
+  file may reach `VIBEFS_MAX_FILE_SIZE` (~8 MiB). The on-disk block map changed
+  in version 2; a v1 image is reformatted on mount.
 * `exec` reuses a single 512 KiB static image buffer, so two execs cannot overlap.
 * `PF_X` is not enforced (no NX bit in 32-bit paging).
 * Programs are still embedded in the kernel image and copied to `/bin` at boot;

@@ -98,7 +98,7 @@ fails the build instead of becoming a kernel bug report at runtime.
 
 - One RW span: programs have a single data/BSS region (true for everything we
   ship; the packer errors otherwise).
-- 1 MiB maximum image span; 60 KiB VibeFS file cap applies on top.
+- 1 MiB maximum image span; the VibeFS max file size applies on top.
 - No execute protection beyond R/W: 32-bit paging without PAE has no NX bit,
   so `PF_X`-style distinctions are parsed nowhere — code is non-writable,
   which is the half we can enforce.

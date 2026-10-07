@@ -22,6 +22,7 @@
  *   SYS_MKDIR   (path, mode)        fs I/O                     reads path
  *   SYS_UNLINK  (path)              fs I/O                     reads path
  *   SYS_RMDIR   (path)              fs I/O                     reads path
+ *   SYS_TRUNCATE(path, size)        fs I/O, frees blocks       reads path
  *   SYS_LSEEK   (fd, off, whence) -> new offset
  *   SYS_READDIR (fd, vibe_dirent*, max) -> count (0 = end)     writes buf
  *
@@ -89,7 +90,8 @@
 #define SYS_PIPE    26
 #define SYS_EXEC    27
 #define SYS_SPAWNFDS 28
-#define SYS_MAX     28
+#define SYS_TRUNCATE 29
+#define SYS_MAX     29
 
 #define E_PERM    1
 #define E_SRCH    3

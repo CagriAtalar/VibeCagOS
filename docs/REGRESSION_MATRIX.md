@@ -19,13 +19,13 @@
 | Scheduler (round-robin) | dead code | preemptive, 30 ms quantum | `scheduler` | kernel non-preemptible by design |
 | sleep / block / wakeup | none | tick deadlines, wait channels | `syscall`, `stdio`, `pipe` | — |
 | Ring-3 processes | none | CPL3, private stacks/stacks | `ring3` | — |
-| `int 0x80` + usercopy | dead code | 28 syscalls, per-page validation | `syscall`, `usercopy` | — |
+| `int 0x80` + usercopy | dead code | 29 syscalls, per-page validation | `syscall`, `usercopy` | — |
 | Per-process fds + TTY | none | 0/1/2 console, `OPEN_MAX` 16 | `stdio`, `fs` | no `dup2` (spawn-time inherit) |
 | VFS | none | mounts, vnodes, refcounts | `fs`, `shell` | no locking (single CPU) |
-| VibeFS | flat SimpleFS | inodes, dirs, 60 KiB max | `fs`, `shell` | no perms check, no indirect blocks |
+| VibeFS | flat SimpleFS | inodes, dirs, ~8 MiB max file (indirect) | `fs`, `shell` | no perms check; no journaling |
 | procfs | none | 11 entries | `shell` | static `/proc/net` |
 | devfs | none | null/zero/console/random/tty | none direct (via console) | no automated test |
-| IDE/ATA PIO | works | works (unchanged) | `fs`, `shell` (persist) | PIO, no DMA/IRQ |
+| IDE/ATA PIO | works | works (unchanged) | `fs`, `shell`, `persist` | PIO, no DMA/IRQ |
 | PCI scan | works | works (unchanged) | `shell` (`pci`) | — |
 | RTL8139 / ARP / IPv4 / ICMP | works | works (unchanged) | none automated | polling NIC, QEMU lossy ping |
 | UDP / DNS | works | works (unchanged) | none automated | kernel-shell commands only, no socket syscalls |

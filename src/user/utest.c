@@ -352,6 +352,90 @@ int user_main(int argc, char **argv) {
         sys_write(1, buf, (u32)total);
         return 0;
     }
+    case 28: {  /* large file: direct -> single -> double indirect, overwrite, truncate */
+        const char *path = "/big.bin";
+        enum { CH = 256 };                    /* sys_read caps a call at IO_CHUNK=256 */
+        const u32 total = 1536u * 1024u;      /* 1.5 MiB: past both indirect levels */
+        static unsigned char buf[CH];
+        static unsigned char chk[32];
+
+        sys_unlink(path);
+        int fd = sys_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd < 0) { puts_("T28: open_fail="); putint(fd); puts_("\n"); return 1; }
+
+        u32 off = 0;
+        int ok = 1;
+        while (off < total) {
+            for (u32 i = 0; i < CH; i++) buf[i] = (unsigned char)((off + i) * 31u + 7u);
+            int w = sys_write(fd, buf, CH);
+            if (w != (int)CH) { ok = 0; break; }
+            off += CH;
+        }
+        sys_close(fd);
+
+        struct vibe_stat st;
+        u32 n = 0xFFFFFFFFu;
+        sys_stat(path, &st); n = st.size;
+        int size_ok = (n == total);
+        puts_("T28: wrote="); putint((int)off); puts_(" size="); putint((int)n);
+        puts_(" write_ok="); putint(ok); puts_("\n");
+
+        /* read the whole thing back byte for byte */
+        fd = sys_open(path, O_RDONLY, 0);
+        off = 0; int rok = 1;
+        while (off < total) {
+            int r = sys_read(fd, buf, CH);
+            if (r != (int)CH) { rok = 0; break; }
+            for (u32 i = 0; i < CH; i++)
+                if (buf[i] != (unsigned char)((off + i) * 31u + 7u)) { rok = 0; break; }
+            if (!rok) break;
+            off += CH;
+        }
+        sys_close(fd);
+        puts_("T28: read_ok="); putint(rok); puts_(" size_ok="); putint(size_ok); puts_("\n");
+
+        /* overwrite 32 bytes deep inside the double-indirect region */
+        fd = sys_open(path, O_RDWR, 0);
+        u32 at = 1200u * 1024u;
+        sys_lseek(fd, (int)at, SEEK_SET);
+        for (u32 i = 0; i < 32; i++) buf[i] = (unsigned char)(0xE0 + i);
+        int ow = sys_write(fd, buf, 32);
+        sys_lseek(fd, (int)at, SEEK_SET);
+        int rd = sys_read(fd, chk, 32);
+        int ov_ok = (ow == 32 && rd == 32 && memcmp(buf, chk, 32) == 0);
+        sys_close(fd);
+        sys_stat(path, &st); n = st.size;
+        int keep_ok = (n == total);
+        puts_("T28: overwrite_ok="); putint(ov_ok); puts_(" size_kept="); putint(keep_ok); puts_("\n");
+
+        /* truncate to 200 KiB: indirect blocks are freed, the prefix survives */
+        int tr = sys_truncate(path, 200u * 1024u);
+        sys_stat(path, &st); n = st.size;
+        fd = sys_open(path, O_RDONLY, 0);
+        off = 0; int pok = 1;
+        while (off < 200u * 1024u) {
+            int r = sys_read(fd, buf, CH);
+            if (r != (int)CH) { pok = 0; break; }
+            for (u32 i = 0; i < CH; i++)
+                if (buf[i] != (unsigned char)((off + i) * 31u + 7u)) { pok = 0; break; }
+            if (!pok) break;
+            off += CH;
+        }
+        int eof_ok = (sys_read(fd, buf, CH) == 0);
+        sys_close(fd);
+        puts_("T28: trunc="); putint(tr); puts_(" trunc_size="); putint((int)n);
+        puts_(" prefix_ok="); putint(pok); puts_(" eof_ok="); putint(eof_ok); puts_("\n");
+
+        /* freed space is reusable and the file can be removed */
+        sys_unlink(path);
+        int gone = (sys_unlink(path) < 0);
+        puts_("T28: unlink_ok="); putint(gone); puts_("\n");
+
+        int pass = ok && size_ok && rok && ov_ok && keep_ok &&
+                   tr == 0 && n == 200u * 1024u && pok && eof_ok && gone;
+        puts_("T28: pass="); putint(pass); puts_("\n");
+        return pass ? 0 : 1;
+    }
     case 12: {  /* exit status */
         return 42;
     }

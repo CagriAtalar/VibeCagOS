@@ -5,7 +5,7 @@
 
 # ============================================================
 # VibeCagOS Build System
-# Version 0.5.0
+# Version 0.6.0
 # ============================================================
 
 QEMU    := qemu-system-i386
@@ -264,9 +264,15 @@ os.iso: kernel.elf
 	@printf 'set timeout=0\nset default=0\n\nmenuentry "VibeCagOS" {\n    multiboot /boot/kernel.elf\n    boot\n}\n' > isodir/boot/grub/grub.cfg
 	grub-mkrescue -o os.iso isodir
 
-# Create disk image
+# Create disk image (16 MiB, matching VIBEFS_TOTAL_SECTORS in src/fs/vibefs.h).
+# Recreated when the size does not match so an old smaller image cannot be
+# written past its end by the larger filesystem.
+DISK_BYTES := 16777216
 disk.img:
-	dd if=/dev/zero of=disk.img bs=1M count=2 status=none
+	@if [ ! -f disk.img ] || [ "$$(stat -c%s disk.img 2>/dev/null)" != "$(DISK_BYTES)" ]; then \
+		echo "Creating 16 MiB disk.img"; \
+		dd if=/dev/zero of=disk.img bs=1M count=16 status=none; \
+	fi
 
 # ============================================================
 # Run targets
@@ -308,8 +314,11 @@ test-proc: os.iso disk.img
 	@tests/run.sh proc
 test-exec: os.iso disk.img
 	@tests/run.sh exec
+# Two boots on one disk image: proves VibeFS data survives a reboot.
+test-persist: os.iso disk.img
+	@tests/persist.sh
 test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio \
-          test-fs test-shell test-pipe test-proc test-exec
+          test-fs test-shell test-pipe test-proc test-exec test-persist
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img

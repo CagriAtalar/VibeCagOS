@@ -3,7 +3,7 @@
 > **Audit date:** 2026-10-07
 > **Basis:** source read of every tracked file, not the README. Every claim below
 > was checked against the code and, where marked *(verified)*, against a QEMU
-> serial run (`make test-all`, 11 suites).
+> serial run (`make test-all`, 12 suites).
 > **Scope:** describes the kernel as it exists now, including its known defects.
 
 ---
@@ -221,11 +221,11 @@ symbols are linked into a user image, and ring 3 cannot call them anyway.
 | 4 | ~~`mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`, `head`, `hexdump` are still shell builtins~~ resolved: every command except the five shell-control builtins is a `/bin` program | — |
 | 5 | ~~a builtin cannot sit in a pipeline~~ resolved: `ls /bin \| head` and `echo x \| cat` are two-program pipelines | — |
 | 6 | `PF_X` is parsed but not enforced: 32-bit paging without PAE has no NX bit | low, inherent |
-| 7 | `vibefs_alloc_block()` rebuilds a `VIBEFS_DATA_SECTORS`-entry bitmap per block: O(inodes × blocks) per allocation | low |
+| 7 | ~~`vibefs_alloc_block()` rebuilds a bitmap per block~~ resolved: the used-block bitmap is built once at mount and maintained on alloc/free | — |
 | 8 | No permission enforcement in VibeFS: `mode` is stored but never checked | medium |
 | 9 | Single-CPU only: no locking anywhere; `run-smp` exists but schedules one CPU | low |
 | 10 | `struct process` embeds a 32 KiB stack, so 16 processes cost 512 KiB of BSS | low |
-| 11 | Maximum file size is 60 KiB (120 direct blocks, no indirection) | low |
+| 11 | ~~Maximum file size is 60 KiB~~ resolved: direct + single + double indirect, ~8 MiB max file on a 16 MiB disk | — |
 | 12 | Kernel page faults are fatal even when a user process caused them indirectly | low |
 | 13 | No `dup2` (fd inheritance is done at spawn time instead) and no signal handling; `kill` is immediate | low |
 | 14 | The GUI (`src/drivers/gui.c`) still runs in ring 0 | see roadmap |
