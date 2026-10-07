@@ -10,10 +10,16 @@
 
 #define PROG(n) extern const uint8_t prog_##n##_start[], prog_##n##_end[];
 PROG(sh)
+PROG(ls)
+PROG(cat)
+PROG(echo)
 PROG(utest)
 
 const struct user_prog user_progs[] = {
     { "sh",    prog_sh_start,    prog_sh_end    },
+    { "ls",    prog_ls_start,    prog_ls_end    },
+    { "cat",   prog_cat_start,   prog_cat_end   },
+    { "echo",  prog_echo_start,  prog_echo_end  },
     { "utest", prog_utest_start, prog_utest_end },
 };
 const int user_prog_count = sizeof(user_progs) / sizeof(user_progs[0]);

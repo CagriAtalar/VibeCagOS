@@ -70,3 +70,9 @@ int    uprintf(int fd, const char *fmt, ...);
 int    uputs(int fd, const char *s);
 /* Read a line from fd 0 with echo + backspace. Returns length, or -1 on error. */
 int    ugetline(char *buf, int max);
+
+/* errno -> message, and "cmd: what: reason" on fd 2 (returns 1, for `return
+ * ufail(...)`). Shared by the shell and by the standalone utilities so every
+ * user program reports errors the same way. */
+const char *uerrstr(int e);
+int    ufail(const char *cmd, const char *what, int rc);

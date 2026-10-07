@@ -19,4 +19,7 @@ prog_\name\()_end:
 .endm
 
 EMBED sh
+EMBED ls
+EMBED cat
+EMBED echo
 EMBED utest

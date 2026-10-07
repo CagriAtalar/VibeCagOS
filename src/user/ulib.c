@@ -101,6 +101,38 @@ int uprintf(int fd, const char *fmt, ...) {
     return o.total;
 }
 
+/* ---- errors ------------------------------------------------------------- */
+const char *uerrstr(int e) {
+    switch (-e) {
+    case E_PERM:   return "Operation not permitted";
+    case E_NOENT:  return "No such file or directory";
+    case E_NOEXEC: return "Exec format error";
+    case E_SRCH:   return "No such process";
+    case E_IO:     return "I/O error";
+    case E_BADF:   return "Bad file descriptor";
+    case E_CHILD:  return "No child processes";
+    case E_NOMEM:  return "Out of memory";
+    case E_ACCES:  return "Permission denied";
+    case E_FAULT:  return "Bad address";
+    case E_EXIST:  return "File exists";
+    case E_NOTDIR: return "Not a directory";
+    case E_ISDIR:  return "Is a directory";
+    case E_INVAL:  return "Invalid argument";
+    case E_MFILE:  return "Too many open files";
+    case E_NOSPC:  return "No space left on device";
+    case E_NAMETOOLONG: return "File name too long";
+    case E_NOTEMPTY: return "Directory not empty";
+    case E_PIPE:   return "Broken pipe";
+    case E_NOSYS:  return "Function not implemented";
+    default:       return "Error";
+    }
+}
+
+int ufail(const char *cmd, const char *what, int rc) {
+    uprintf(2, "%s: %s%s%s\n", cmd, what ? what : "", what ? ": " : "", uerrstr(rc));
+    return 1;
+}
+
 /* ---- line input (the console is a raw TTY: echo/editing happen here) ---- */
 int ugetline(char *buf, int max) {
     int len = 0;

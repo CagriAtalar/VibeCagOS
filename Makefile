@@ -107,7 +107,9 @@ user_crt0.o: src/user/crt0.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 # Every user program = crt0 + its own .c + the tiny user library (ulib.c).
-USER_PROGS := sh utest
+# sh is the shell; ls/cat/echo are ordinary utilities that the shell spawns
+# instead of implementing them as builtins (milestone 14).
+USER_PROGS := sh ls cat echo utest
 USER_LIB_OBJS := user_crt0.o user_ulib.o
 
 user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h

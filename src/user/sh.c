@@ -4,11 +4,14 @@
  * Runs as an ordinary process: every action is a system call (see
  * src/abi/syscall.h). It includes no kernel header and cannot reach any
  * kernel function. System information commands read procfs files through
- * open()/read(); anything that is not a builtin is spawn()ed from the
- * built-in program table and wait()ed for (or left running with a trailing &).
+ * open()/read(); anything that is not a builtin is spawned as a separate
+ * program and waited for (or left running with a trailing &).
  *
- * Redirection (> and >>) works for builtins; spawned programs always get the
- * console as fd 0/1/2 (fd inheritance comes with pipes).
+ * Redirection (`>`, `>>`) and pipelines (`|`) work for programs as well as for
+ * builtins, because SYS_SPAWNFDS can hand a child the caller's descriptors.
+ *
+ * ls, cat and echo are NOT builtins: they are separate ELF programs in /bin,
+ * which is why `utest 25 | cat` is a real two-process pipeline.
  */
 #include "ulib.h"
 
@@ -19,35 +22,7 @@
 static int ofd = 1;     /* where builtins write (1, or a redirected file) */
 
 #define out(...) uprintf(ofd, __VA_ARGS__)
-
-static const char *errstr(int e) {
-    switch (-e) {
-    case E_PERM:   return "Operation not permitted";
-    case E_NOENT:  return "No such file or directory";
-    case E_SRCH:   return "No such process";
-    case E_IO:     return "I/O error";
-    case E_NOEXEC: return "Exec format error";
-    case E_BADF:   return "Bad file descriptor";
-    case E_CHILD:  return "No child processes";
-    case E_NOMEM:  return "Out of memory";
-    case E_ACCES:  return "Permission denied";
-    case E_FAULT:  return "Bad address";
-    case E_EXIST:  return "File exists";
-    case E_NOTDIR: return "Not a directory";
-    case E_ISDIR:  return "Is a directory";
-    case E_INVAL:  return "Invalid argument";
-    case E_MFILE:  return "Too many open files";
-    case E_NOSPC:  return "No space left on device";
-    case E_NAMETOOLONG: return "File name too long";
-    case E_NOTEMPTY: return "Directory not empty";
-    case E_NOSYS:  return "Function not implemented";
-    default:       return "Error";
-    }
-}
-static int fail(const char *cmd, const char *what, int rc) {
-    uprintf(2, "%s: %s%s%s\n", cmd, what ? what : "", what ? ": " : "", errstr(rc));
-    return 1;
-}
+#define fail(...) ufail(__VA_ARGS__)
 
 /* ---- helpers ------------------------------------------------------------ */
 static int copy_fd(int in, int outfd) {
@@ -69,43 +44,8 @@ static int cat_path(const char *cmd, const char *path) {
 }
 
 /* ---- builtins ----------------------------------------------------------- */
-static int cmd_ls(int argc, char **argv) {
-    int longfmt = 0; const char *path = ".";
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-l")) longfmt = 1; else path = argv[i];
-    }
-    int fd = sys_open(path, O_RDONLY, 0);
-    if (fd < 0) return fail("ls", path, fd);
-    struct vibe_dirent d;
-    int rc = 0, r;
-    while ((r = sys_readdir(fd, &d, 1)) == 1) {
-        if (!strcmp(d.name, ".") || !strcmp(d.name, "..")) continue;
-        char t = d.type == VIBE_TYPE_DIR ? 'd' : d.type == VIBE_TYPE_CHR ? 'c' : '-';
-        if (!longfmt) { out("%c  %s\n", t, d.name); continue; }
-        char full[300]; struct vibe_stat st;
-        strcpy(full, path);
-        if (full[strlen(full) - 1] != '/') strcpy(full + strlen(full), "/");
-        strncpy(full + strlen(full), d.name, 200);
-        if (sys_stat(full, &st) < 0) { st.size = 0; st.mode = 0; }
-        out("%c %03o %6u  %s\n", t, st.mode, st.size, d.name);
-    }
-    if (r < 0) rc = fail("ls", path, r);
-    sys_close(fd);
-    return rc;
-}
-
-static int cmd_cat(int argc, char **argv) {
-    if (argc < 2) { return copy_fd(0, ofd) < 0; }
-    int rc = 0;
-    for (int i = 1; i < argc; i++) rc |= cat_path("cat", argv[i]);
-    return rc;
-}
-
-static int cmd_echo(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) out("%s%s", argv[i], i + 1 < argc ? " " : "");
-    out("\n");
-    return 0;
-}
+/* ls, cat and echo live in /bin as separate programs (src/user/{ls,cat,echo}.c).
+ * Keeping them here would have meant the shell, not the kernel, owned them. */
 
 static int cmd_touch(int argc, char **argv) {
     int rc = 0;
@@ -242,18 +182,16 @@ static int cmd_wait(int argc, char **argv) {
 static int cmd_help(int argc, char **argv) {
     (void)argc; (void)argv;
     out("VibeCagOS user shell (Ring 3). Builtins:\n"
-        "  ls [-l] [dir]  cd [dir]  pwd  mkdir  rmdir  touch  rm  mv  cp  cat  head [-n N]\n"
-        "  echo [text]  write <file> <text>  stat  hexdump\n"
-        "  ps  kill <pid>  wait  sleep <ms>  uptime  date  uname  free  mem\n"
-        "  cpuinfo  devices  pci  dmesg  mounts  net  clear  help  exit\n"
-        "  exec <program> [args...]  replace this shell with another ELF program\n"
+        "  cd [dir]  pwd  mkdir  rmdir  touch  rm  mv  cp  head [-n N]  write  stat\n"
+        "  hexdump  ps  kill <pid>  wait  sleep <ms>  clear  help  exit\n"
+        "  uptime  date  uname  free  mem  cpuinfo  devices  pci  dmesg  mounts  net\n"
+        "  exec <program> [args...]   replace this shell with another ELF program\n"
         "Syntax:\n"
         "  cmd > file   cmd >> file   redirection (builtins and programs)\n"
-        "  cmd1 | cmd2  pipelines between programs, e.g. utest 21 | cat\n"
+        "  cmd1 | cmd2  pipelines between programs, e.g. utest 25 | cat\n"
         "  cmd &        run in the background; 'wait' reaps them\n"
-        "Programs (spawned in their own address space, ELF32 images):\n"
-        "  utest <n>   Ring-3 self tests\n"
-        "  /bin/utest <n>  the same program, named by path\n");
+        "Programs in /bin (separate ELF images, own address space):\n"
+        "  ls [-l] [dir]   cat [file...]   echo [text]   utest <n>\n");
     return 0;
 }
 
@@ -270,9 +208,6 @@ static int cmd_exec(int argc, char **argv) {
 static int run_builtin(int argc, char **argv, int *found) {
     const char *c = argv[0];
     *found = 1;
-    if (!strcmp(c, "ls"))      return cmd_ls(argc, argv);
-    if (!strcmp(c, "cat"))     return cmd_cat(argc, argv);
-    if (!strcmp(c, "echo"))    return cmd_echo(argc, argv);
     if (!strcmp(c, "touch"))   return cmd_touch(argc, argv);
     if (!strcmp(c, "write"))   return cmd_write(argc, argv);
     if (!strcmp(c, "cp"))      return cmd_cp(argc, argv);

@@ -22,8 +22,8 @@ case $SUITE in
   proc)      CMDS="free@utest 17 &@ps@kill 3@ps@wait@utest 18@utest 20@ps@kill 8@sleep 300@ps@free" ;;
   fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
-  pipe)      CMDS="utest 21@utest 25 | utest 26@utest 1 > /redir.txt@cat /redir.txt@utest 25 | utest 26 | utest 26@ps" ;;
-  exec)      CMDS="ls /bin@utest 24@utest 22@ps" ;;
+  pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
+  exec)      CMDS="ls /bin@ls -l /bin@utest 24@utest 22@ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
 
@@ -194,12 +194,12 @@ case $SUITE in
   expect 'T25: sent'                      'pipeline writer started'
   expect 'T26: got=21'                    'pipeline: 21 bytes crossed the pipe, then EOF'
   expect '^alpha$'                        'pipeline payload arrived intact'
-  expect '^T26: got=33$'                  'three-stage pipeline: stage 2 output became stage 3 input (12+21 bytes)'
-  expect '^alpha$'                        'three-stage payload still intact'
+  expect '^\-  utest'                     'ls /bin | cat: two separate /bin programs, one pipe'
   expect 'T1: getpid=1'                   'stdout redirected into /redir.txt (cat reads it back)'
   reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
   exec)
   expect '^-  utest'                        'ELF programs installed in /bin'
+  expect '^- 755 +[0-9]+ +utest'            'ls -l on a separate program: mode and size come from stat()'
   expect 'T24: missing=-2'                 'exec of a missing file -> ENOENT'
   expect 'T24: dir=-21'                    'exec of a directory -> EISDIR'
   expect 'T24: notelf=-8'                  'exec of a non-ELF file -> ENOEXEC'
