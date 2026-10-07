@@ -3,7 +3,10 @@
 > A hobby 32-bit x86 operating system built with architectural clarity,  
 > educational depth, and genuine end-to-end functionality.
 
-**Version 0.3.0** | i386 Protected Mode | GRUB Multiboot | QEMU Tested
+i386 Protected Mode | GRUB Multiboot | QEMU Tested
+>
+> The shell (`sh`) is an **ordinary Ring-3 user process**. The kernel starts it
+> as `init` and no longer contains an interactive shell on its boot path.
 
 ---
 
@@ -71,26 +74,44 @@ gdb kernel.elf -ex 'target remote :1234' -ex 'break kernel_main' -ex 'continue'
 ## User Mode (Ring 3)
 
 User programs run in ring 3 with a private page directory. The kernel is
-identity-mapped but supervisor-only; user space lives at `0x40000000`:
+identity-mapped but supervisor-only (`src/kernel/vmm.c` refuses any `PAGE_USER`
+mapping outside the user window, so kernel pages can never become user-readable).
 
 ```
-0x40000000  program image (flat binary)      0x7FFFC000-0x80000000  user stack
+0x00000000 - __free_ram_end   kernel identity map, supervisor-only, SHARED
+0x10000000 (USER_BASE)        user image: text read-only, data/bss read-write
+0x1FFFF000 - 0x20000000       user stack (4 pages); page below left unmapped
+up to 0xC0000000 (USER_END)   reserved for user space (heap/mmap later)
 ```
+
+Constants live in `src/kernel/kernel.h` (`USER_BASE`, `USER_STACK_TOP`,
+`USER_END`), where the full layout is documented.
 
 - **Syscalls** use `int 0x80` (DPL 3 gate): `eax` = number, `ebx/ecx/edx` = args, result in `eax`.
-  Every pointer argument is validated (`src/kernel/uaccess.c`) before the kernel touches it.
-- **Preemption**: the PIT timer switches away from ring 3 code. Ticks that land while the kernel is
-  inside a syscall do not preempt (the kernel is not reentrant yet).
-- **Faults in ring 3** (#GP, #PF, ...) terminate only the offending process.
-- Programs live in `user/` (runtime in `user/ulib.h`, linker script `user/user.ld`), are built to flat
-  binaries and embedded into the kernel image by `src/kernel/userprog.S`.
+  Every pointer argument is validated by `src/kernel/usercopy.c`
+  (`copy_from_user` / `copy_to_user` / `strncpy_from_user`) before the kernel
+  touches it: range, wrap-around, per-page `PAGE_USER` and read/write permission
+  are all checked, so a buffer may span pages safely and a bad pointer yields
+  `-EFAULT` instead of a kernel panic.
+- **Preemption**: the PIT timer (100 Hz, 3-tick quantum) switches away from ring 3
+  code by swapping kernel stacks inside `schedule()`; the interrupted process
+  resumes through its own saved trap frame and `iret`s back to the exact faulting
+  instruction. Ticks that land while the kernel is inside a syscall do not
+  preempt -- the kernel is deliberately non-reentrant at this stage.
+- **Faults in ring 3** (#GP, #PF, ...) terminate only the offending process;
+  kernel-mode faults remain fatal.
+- Programs are built from `src/user/*.c` against `src/user/ulib.h` and the shared
+  ABI in `src/abi/syscall.h`, linked by `src/user/user.ld` at `USER_BASE` as flat
+  "VBIN" images, then embedded into the kernel by `src/kernel/userblob.s` and
+  listed in `src/kernel/progs.c`.
 
 ```
-progs            list built-in user programs
-run <prog> [&]   run a program in ring 3 (& = background)
-usertest         two CPU hogs; their output interleaves if preemption works
-make test-user   scripted ring 3 integration test under QEMU
+utest <n>       run a Ring-3 self test (& = background)
+ps              list processes with their kernel state
 ```
+
+`make test-all` runs the deterministic QEMU suites: `ring3`, `syscall`,
+`scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `proc`.
 
 ---
 
