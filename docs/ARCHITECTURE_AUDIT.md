@@ -35,7 +35,12 @@ kernel_main(mb_magic, mb_info)     src/kernel/kernel.c
           |
      switch_context -> idle -> kinit
           |
-     kinit_main(): create "sh" as a Ring-3 process, process_wait(), power_off()
+     kinit_main(): kernel_spawn_path("/sbin/init") [embedded-sh fallback],
+                   process_wait(), power_off()
+          |
+     init (Ring 3, pid 2): spawn "/bin/sh", waitpid, propagate status
+          |
+     sh (Ring 3, pid 3): the interactive shell
 ```
 
 `run_shell()` still exists but is only reachable through `make KSHELL=1`
@@ -210,7 +215,7 @@ symbols are linked into a user image, and ring 3 cannot call them anyway.
 |---|---|---|
 | 1 | `exec` abandons the kernel C frames below ESP; the memory is not reclaimed until the process dies | low |
 | 2 | `exec_image` is a 512 KiB static buffer, so a second exec cannot overlap the first | low, by design |
-| 3 | User programs are still linked into the kernel image and copied to `/bin` at boot | medium (documented staging) |
+| 3 | User programs are still linked into the kernel image (`userblob.s`) as a boot fallback, but the disk is authoritative: bare names try `/bin` first, kinit starts `/sbin/init` from the VFS | medium (documented staging) |
 | 4 | `mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`, `head`, `hexdump` are still shell builtins, not `/bin` programs | low |
 | 5 | A builtin cannot sit in a pipeline: `ls` is a program so `ls \| cat` works, `ps` is a builtin so it cannot | low |
 | 6 | `PF_X` is parsed but not enforced: 32-bit paging without PAE has no NX bit | low, inherent |

@@ -62,7 +62,7 @@ extern char __free_ram[], __free_ram_end[];
  * VibeCagOS Version
  * ========================================================================= */
 
-#define VIBECAGOS_VERSION "0.4.0"
+#define VIBECAGOS_VERSION "0.5.0"
 #define VIBECAGOS_BUILD   "2026-10-03"
 
 /* =========================================================================
@@ -1543,9 +1543,9 @@ static void cmd_gui(void) {
 }
 
 /* =========================================================================
- * User-mode test launcher (shell commands: utest / utest2 / uspawn)
- * The embedded flat binary src/user/utest.c is built separately and linked
- * in as data; it runs in Ring 3 and talks to the kernel only via int 0x80.
+ * User-mode test launcher (KSHELL_DEBUG commands: utest / utest2 / uspawn)
+ * The embedded ELF32 image built from src/user/utest.c is linked in as data;
+ * it runs in Ring 3 and talks to the kernel only via int 0x80.
  * ========================================================================= */
 
 
@@ -2033,7 +2033,7 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
             /* Create /etc/version */
             struct file *f = vfs_open("/etc/version", FILE_WRITE, VFS_PERM_DEFAULT_FILE);
             if (f) {
-                const char *ver = "VibeCagOS 0.4.0\n";
+                const char *ver = "VibeCagOS 0.5.0\n";
                 vfs_write(f, ver, strlen(ver));
                 vfs_close(f);
             }

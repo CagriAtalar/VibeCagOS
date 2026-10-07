@@ -242,7 +242,8 @@ VibeCagOS/
 3. **VibeFS Hierarchical Filesystem:**
    - Inode-based disk filesystem supporting nested directories (`/home/user`, `/var/log`, `/usr/bin`, etc.).
    - Multi-block directory entries with `.` and `..` support.
-   - Max file size up to 8KB (16 direct blocks × 512 bytes).
+   - Max file size up to 8KB at the time (16 direct blocks × 512 bytes);
+     since grown to 60 KiB (120 direct blocks). See docs/ for current limits.
    - Inode sector flushing and block bitmap allocator.
 
 4. **procfs Pseudo-Filesystem:**

@@ -88,9 +88,17 @@ programs: `src/user/utest.c`.
 ## User-space shell, spawn/wait, cwd, argv (M10/M11)
 
 **Boot flow now:** `kernel_main -> process_init -> kinit (kernel thread, pid 1)
--> spawn "sh" (Ring 3) -> process_wait`. `run_shell()` is no longer on the boot
-path (it only runs in the `make KSHELL=1` debug build). When `sh` exits, kinit
-powers the machine off.
+-> /sbin/init (Ring 3, pid 2) -> /bin/sh (Ring 3, pid 3)`. `run_shell()` is no
+longer on the boot path (it only runs in the `make KSHELL=1` debug build).
+When `sh` exits, init propagates the status to kinit, which powers the machine
+off.
+
+**Disk-first loading:** a bare name (`spawn("sh")`) tries `/bin/<name>` on the
+disk first and falls back to the embedded table only when the file is absent;
+paths with `/` always go through the VFS. kinit starts `/sbin/init` from the
+filesystem with an embedded-`sh` fallback, and init starts `/bin/sh` the same
+way. The embedded images (`userblob.s`) are staging only: a populated disk
+boots without them.
 
 **Process creation:** `process_create_user(name, image, size, argc, argv)` builds
 the initial user stack (argc / argv[] / strings, System-V style); `crt0.s`

@@ -60,7 +60,7 @@
 
 | Feature | State | Notes |
 |---|---|---|
-| `int 0x80` dispatcher with a central ABI header | done | 27 syscalls, `src/abi/syscall.h` |
+| `int 0x80` dispatcher with a central ABI header | done | 28 syscalls (`SYS_MAX`), `src/abi/syscall.h` |
 | Validated `copy_from_user` / `copy_to_user` / `strncpy_from_user` | done | per-page checks, no partial copies |
 | Unknown syscall → `-ENOSYS`, bad fd → `-EBADF` | done | |
 | Errors as `-errno` | done | VFS errors translated in `sysfile.c` |
@@ -84,7 +84,8 @@
 |---|---|---|
 | User-space shell (`sh`) as an ordinary Ring-3 process | done | `kernel_main` no longer calls `run_shell` |
 | Shell uses only syscalls, includes no kernel header | done | |
-| ELF user programs in `/bin` | done | installed at boot from embedded images |
+| ELF user programs in `/bin` + `/sbin/init` | done | installed at boot; disk is authoritative, embedded is fallback |
+| Ring-3 init (`/sbin/init` spawns `/bin/sh`, propagates status) | done | boot is kinit → init → sh |
 | Pipes as the first IPC primitive | done | `test-pipe` |
 | fd inheritance at spawn (`SYS_SPAWNFDS`), shell pipelines `\|` | done | `ls /bin \| cat` |
 | Utilities as separate ELF programs (`ls`, `cat`, `echo`) | done | milestone 14 |

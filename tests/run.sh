@@ -1,6 +1,6 @@
 #!/bin/sh
 # Deterministic QEMU serial tests for the Ring-3 / syscall / scheduler work.
-# usage: tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs|shell|proc>
+# usage: tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs|shell|pipe|proc|exec>
 # Boots os.iso headless, types shell commands over the serial port, captures
 # the serial log and greps for expected lines. Exit code != 0 on any failure.
 QEMU=${QEMU:-qemu-system-i386}

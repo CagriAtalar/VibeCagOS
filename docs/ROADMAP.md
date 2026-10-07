@@ -1,9 +1,9 @@
 # VibeCagOS — Roadmap
 
-> **Status:** Ring-3 migration milestones 0–14 complete. ELF32 loader and
-> `exec()` landed most recently. Next up: userspace utilities, then the GUI
-> foundation. See `docs/ARCHITECTURE_AUDIT.md` for the state of the code and
-> `docs/RING3.md` for the CPU-level flows.
+> **Status:** Ring-3 migration milestones 0–14 complete, plus a real Ring-3
+> `/sbin/init` with filesystem-first program loading. Next up: the GUI
+> foundation (milestone 15). See `docs/ARCHITECTURE_AUDIT.md` for the state of
+> the code and `docs/RING3.md` for the CPU-level flows.
 
 ---
 
@@ -26,6 +26,7 @@
 | 12 | ELF32 loader + filesystem programs | done | `test-exec` |
 | 13 | Pipes (IPC primitive) | done | `test-pipe` |
 | 14 | Userspace utilities | done | `ls`, `cat`, `echo` are /bin programs |
+| 14b | Ring-3 init + disk-first loading | done | `/sbin/init` spawns `/bin/sh`; bare names try `/bin` first |
 | 15 | GUI foundation (framebuffer, input, IPC) | **next** | — |
 | 16 | Compositor / window manager / apps | not started | — |
 
