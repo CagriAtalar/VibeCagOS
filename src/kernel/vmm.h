@@ -28,6 +28,10 @@ void     vmm_map_page(uint32_t *pd, vaddr_t vaddr, paddr_t paddr, uint32_t flags
 /* Unmap a virtual page */
 void     vmm_unmap_page(uint32_t *pd, vaddr_t vaddr);
 
+/* Replace a mapped page's flags (PRESENT/USER/WRITABLE). Used by the ELF
+ * loader to demote code pages to read-only after the file bytes are copied. */
+bool     vmm_set_page_flags(uint32_t *pd, vaddr_t vaddr, uint32_t flags);
+
 /* Query physical address for a virtual address. Returns true if mapped. */
 bool     vmm_get_mapping(uint32_t *pd, vaddr_t vaddr, paddr_t *out_paddr);
 

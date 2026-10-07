@@ -249,6 +249,40 @@ int user_main(int argc, char **argv) {
         puts_("T21: badptr="); putint(sys_pipe((int *)0x00100000)); puts_("\n");
         return 0;
     }
+    case 22: {  /* exec: hand argv to the new image, leak an fd on the way out */
+        puts_("T22: argv0="); puts_(argc > 0 ? argv[0] : "(none)"); puts_("\n");
+        int fd = sys_open("/t22.txt", O_CREAT | O_WRONLY, 0644);
+        puts_("T22: open_fd="); putint(fd); puts_("\n");
+        /* exec replaces this process; only the new program's output follows. */
+        const char *a[] = { "/bin/utest", "23", "extra", 0 };
+        puts_("T22: exec="); putint(sys_exec("/bin/utest", a)); puts_("\n");
+        puts_("T22: SURVIVED\n");            /* must not appear */
+        return 0;
+    }
+    case 23: {  /* running as the image exec(2) started: argv and fds */
+        puts_("T23: argc="); putint(argc);
+        puts_(" argv0="); puts_(argc > 0 ? argv[0] : "(none)");
+        puts_(" argv1="); puts_(argc > 1 ? argv[1] : "(none)");
+        puts_(" argv2="); puts_(argc > 2 ? argv[2] : "(none)");
+        puts_("\n");
+        /* POSIX exec keeps 0,1,2 and closes everything else. */
+        puts_("T23: leaked_fd="); putint(sys_close(3)); puts_("\n");
+        puts_("T23: stdout="); putint(sys_fstat(1, 0) == -14); puts_("\n");
+        puts_("T23: hello from the exec'd image\n");
+        return 55;
+    }
+    case 24: {  /* exec rejections: each must fail cleanly, leaving us alive */
+        puts_("T24: missing="); putint(sys_exec("/nope", 0)); puts_("\n");
+        puts_("T24: dir="); putint(sys_exec("/proc", 0)); puts_("\n");
+        /* a text file is not an ELF executable */
+        int fd = sys_open("/etc/version", O_RDONLY, 0);
+        puts_("T24: open_text="); putint(fd >= 3); puts_("\n");
+        if (fd >= 3) sys_close(fd);
+        puts_("T24: notelf="); putint(sys_exec("/etc/version", 0)); puts_("\n");
+        puts_("T24: badptr="); putint(sys_exec((const char *)0x00100000, 0)); puts_("\n");
+        puts_("T24: alive\n");
+        return 0;
+    }
     case 12: {  /* exit status */
         return 42;
     }

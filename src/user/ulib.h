@@ -36,6 +36,10 @@ static inline int sys_kill(int pid)                          { return syscall3(S
 static inline int sys_clear(void)                            { return syscall3(SYS_CLEAR, 0, 0, 0); }
 /* Create a pipe; returns 0 and fills fds[0]=read end, fds[1]=write end. */
 static inline int sys_pipe(int *fds)                         { return syscall3(SYS_PIPE, (u32)fds, 0, 0); }
+/* Replace this process with the ELF at `path`. Returns only on failure. */
+static inline int sys_exec(const char *path, const char *const *argv) {
+    return syscall3(SYS_EXEC, (u32)path, (u32)argv, 0);
+}
 
 /* ---- tiny libc (ulib.c). No kernel code is reachable from here. ---- */
 typedef unsigned int usize;

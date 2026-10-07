@@ -36,6 +36,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "klog.h"
+#include "elf.h"
 #include "../abi/syscall.h"
 #include "../fs/vfs.h"
 
@@ -54,6 +55,10 @@ static inline void stack_canary_check(struct process *p) {
 static inline uint32_t kstack_top(struct process *p) {
     return (uint32_t)&p->stack[KERNEL_STACK];
 }
+
+/* Public accessor for the exec path (exec.c), which builds its own iret frame
+ * on top of the current process's kernel stack. */
+uint32_t kernel_stack_top(struct process *p) { return kstack_top(p); }
 
 /* ------------------------------------------------------------------------ */
 /* Scheduler                                                                */
@@ -212,18 +217,23 @@ struct process *process_create_kthread(const char *name, void (*entry)(void)) {
 }
 
 /*
- * Load a flat "VBIN" user image (see abi/syscall.h) into a new private
- * address space and make the process runnable.
+ * Create a user process from an ELF32 image (see elf.c).
  *
- *   text pages  : PRESENT|USER            (read-only, no write)
- *   data/bss    : PRESENT|USER|WRITABLE
+ *   image pages : PRESENT|USER, plus WRITABLE only for PF_W segments, so text
+ *                 and rodata are genuinely read-only and CR0.WP makes even
+ *                 the kernel honour that
  *   stack       : PRESENT|USER|WRITABLE, USER_STACK_PAGES pages below
  *                 USER_STACK_TOP; the page below is left unmapped (guard)
- *   `arg` is delivered in EAX at entry (crt0 passes it to user_main).
+ *   entry       : e_entry from the ELF header; argc rides in EAX at entry
+ *                 (crt0.s passes it to user_main)
+ *
+ * `image` is the raw file: an embedded blob (Phase 1) or the bytes the ELF
+ * loader got from the VFS. The caller keeps ownership; nothing is retained.
  */
 /* Write bytes into the (already mapped, writable) user stack of address
- * space `pd` through the identity map. Returns false if unmapped. */
-static bool ustack_put(uint32_t *pd, uint32_t va, const void *src, size_t n) {
+ * space `pd` through the identity map. Returns false if unmapped.
+ * Shared with the exec path so both build the same initial stack. */
+bool ustack_write(uint32_t *pd, uint32_t va, const void *src, size_t n) {
     const uint8_t *s = (const uint8_t *)src;
     while (n) {
         paddr_t pa;
@@ -256,28 +266,23 @@ static bool build_user_stack(struct process *p, int argc, const char *const *arg
         size_t len = strlen(argv[i]) + 1;
         if (len > SPAWN_ARG_LEN) return false;
         va -= (uint32_t)len;
-        if (!ustack_put(p->page_table, va, argv[i], len)) return false;
+        if (!ustack_write(p->page_table, va, argv[i], len)) return false;
         ptrs[i] = va;
     }
     ptrs[argc] = 0;
     va &= ~15u;
     va -= 4u * (uint32_t)(argc + 1);
-    if (!ustack_put(p->page_table, va, ptrs, 4u * (uint32_t)(argc + 1))) return false;
+    if (!ustack_write(p->page_table, va, ptrs, 4u * (uint32_t)(argc + 1))) return false;
     va -= 4;
     uint32_t n = (uint32_t)argc;
-    if (!ustack_put(p->page_table, va, &n, 4)) return false;
+    if (!ustack_write(p->page_table, va, &n, 4)) return false;
     p->user_esp = va;
     return true;
 }
 
 struct process *process_create_user(const char *name, const void *image,
                                     size_t image_size, int argc, const char *const *argv) {
-    const struct vbin_header *h = (const struct vbin_header *)image;
-    if (image_size < sizeof(*h) || h->magic != VBIN_MAGIC) return NULL;
-    if (h->file_size > image_size || h->file_size > h->mem_size) return NULL;
-    if (h->mem_size == 0 || h->mem_size > (1u << 20)) return NULL;
-    if ((h->text_size & 0xFFF) || h->text_size > h->mem_size) return NULL;
-    if (h->entry < USER_BASE || h->entry >= USER_BASE + h->mem_size) return NULL;
+    if (image_size < sizeof(struct elf32_ehdr)) return NULL;
 
     uint32_t fl = irq_save();
     struct process *p = alloc_slot();
@@ -290,19 +295,13 @@ struct process *process_create_user(const char *name, const void *image,
     uint32_t *pd = vmm_create_address_space();
     if (!pd) { p->state = PROC_UNUSED; return NULL; }
 
-    /* image */
-    for (uint32_t off = 0; off < h->mem_size; off += PAGE_SIZE) {
-        paddr_t frame = pmm_alloc_frame();          /* zero-filled */
-        if (!frame) goto fail;
-        if (off < h->file_size) {
-            uint32_t n = h->file_size - off;
-            if (n > PAGE_SIZE) n = PAGE_SIZE;
-            memcpy((void *)frame, (const uint8_t *)image + off, n);
-        }
-        uint32_t fl2 = VMM_FLAG_USER | ((off < h->text_size) ? 0 : VMM_FLAG_WRITABLE);
-        vmm_map_page(pd, USER_BASE + off, frame, fl2);
+    /* ELF32 image: one PT_LOAD per permission class, validated by elf.c */
+    uint32_t entry = 0;
+    if (elf_load(pd, image, image_size, &entry) < 0) {
+        KWARN("PROC", "pid %d '%s': ELF rejected: %s", p->pid, name, elf_error());
+        goto fail;
     }
-    /* stack */
+    /* stack: USER_STACK_PAGES writable pages below USER_STACK_TOP */
     for (int i = 1; i <= USER_STACK_PAGES; i++) {
         paddr_t frame = pmm_alloc_frame();
         if (!frame) goto fail;
@@ -311,7 +310,7 @@ struct process *process_create_user(const char *name, const void *image,
     }
 
     p->page_table = pd;
-    p->user_entry = h->entry;
+    p->user_entry = entry;
     p->ppid       = 0;
     if (!build_user_stack(p, argc, argv)) { p->page_table = NULL; goto fail; }
     strcpy(p->cwd, "/");
@@ -448,6 +447,24 @@ int process_kill(int pid) {
 void process_init(void) {
     memset(procs, 0, sizeof(procs));
     idle_proc = process_create_kthread("idle", idle_task);   /* slot 0, pid 0 */
+}
+
+/*
+ * Enter Ring 3 through `tf` (a complete iret frame) without going back to the
+ * scheduler.
+ *
+ * This is the SYS_EXEC tail. It runs on the caller's kernel stack with the
+ * old C frames still live below ESP, so it cannot simply `iret` (there is no
+ * returning frame for the iret to consume). Instead it builds the same
+ * "switch_context frame whose return address is trapret" that a brand-new
+ * process gets, and switches onto it. Execution continues on that frame and
+ * iret's into the new image; the frames underneath are never read again.
+ */
+void exec_return_to_user(struct trap_frame *tf) {
+    uint32_t *sp = push_switch_frame((uint32_t *)tf, (uint32_t)trapret);
+    uint32_t dead_sp;
+    switch_context(&dead_sp, (uint32_t)sp);
+    for (;;) halt();          /* unreachable: PANIC() would return */
 }
 
 /* Hand the CPU to the scheduler. Never returns: the boot stack is abandoned. */

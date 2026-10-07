@@ -90,6 +90,25 @@ void vmm_unmap_page(uint32_t *pd, vaddr_t vaddr) {
     vmm_invlpg(vaddr);
 }
 
+bool vmm_set_page_flags(uint32_t *pd, vaddr_t vaddr, uint32_t flags) {
+    uint32_t pde_idx = vaddr >> 22;
+    uint32_t pte_idx = (vaddr >> 12) & 0x3FF;
+
+    if ((flags & VMM_FLAG_USER) && !is_user_va(vaddr)) {
+        KERROR("VMM", "refusing USER protection of kernel address 0x%08x", vaddr);
+        return false;
+    }
+    if ((pd[pde_idx] & VMM_FLAG_PRESENT) == 0) return false;
+
+    uint32_t *page_table = (uint32_t *)(pd[pde_idx] & ~0xFFFu);
+    if ((page_table[pte_idx] & VMM_FLAG_PRESENT) == 0) return false;
+
+    uint32_t frame = page_table[pte_idx] & ~0xFFFu;
+    page_table[pte_idx] = frame | (flags & 0xFFFu) | VMM_FLAG_PRESENT;
+    vmm_invlpg(vaddr);
+    return true;
+}
+
 bool vmm_get_mapping(uint32_t *pd, vaddr_t vaddr, paddr_t *out_paddr) {
     uint32_t pde_idx = vaddr >> 22;
     uint32_t pte_idx = (vaddr >> 12) & 0x3FF;

@@ -17,6 +17,9 @@ int sys_readdir(uint32_t fd, void *udirent, uint32_t max);
 int sys_chdir(const char *upath);
 int sys_getcwd(char *ubuf, uint32_t size);
 int sys_rename(const char *uold, const char *unew);
-int sys_spawn(const char *uname, const char *const *uargv);
 int sys_waitpid(int pid, int *ustatus);
 int sys_kill(int pid);
+
+/* Shared with exec.c, which resolves and reads program images the same way. */
+int  path_resolve(const char *cwd, const char *in, char *out, size_t outsz);
+int  vfs_err(int vfs_return);

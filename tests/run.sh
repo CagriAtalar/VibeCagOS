@@ -21,6 +21,7 @@ case $SUITE in
   fs)        CMDS="utest 15|utest 15|utest 16|ps" ;;
   faults)    CMDS="utest 3|utest 8|utest 9|utest 10|utest 11|utest 0|ps" ;;
   pipe)      CMDS="utest 21|ps" ;;
+  exec)      CMDS="ls /bin|utest 24|utest 22|ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
 
@@ -188,6 +189,20 @@ case $SUITE in
   expect 'T21: drain_ok=1 got=4096'        'all buffered bytes survive the writer closing'
   expect 'T21: eof=1'                      'drained pipe then reports EOF'
   expect 'T21: badptr=-14'                 'pipe() with a kernel pointer -> EFAULT'
+  reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
+  exec)
+  expect '^-  utest'                        'ELF programs installed in /bin'
+  expect 'T24: missing=-2'                 'exec of a missing file -> ENOENT'
+  expect 'T24: dir=-21'                    'exec of a directory -> EISDIR'
+  expect 'T24: notelf=-8'                  'exec of a non-ELF file -> ENOEXEC'
+  expect 'T24: badptr=-14'                 'exec with a kernel pointer -> EFAULT'
+  expect 'T24: alive'                      'process survives every rejected exec'
+  expect 'T22: open_fd=3'                  'fd 3 allocated before exec'
+  expect 'T23: argc=3 argv0=/bin/utest argv1=23 argv2=extra' 'exec passes argv'
+  expect 'T23: leaked_fd=-9'               'exec closed everything but fd 0/1/2'
+  expect 'T23: hello from the exec.d image' 'new image runs in the same pid'
+  expect '\[pid [0-9]+\] exit code 55'      "exec'd image's exit status reaches the parent"
+  reject 'SURVIVED'                        'no exec() returned after succeeding'
   reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
 esac
 [ $FAIL -eq 0 ] && echo "  => OK" || { echo "  => FAILED (log kept in /tmp/vibe-last.log)"; cp "$LOG" /tmp/vibe-last.log; }

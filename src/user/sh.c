@@ -25,6 +25,7 @@ static const char *errstr(int e) {
     case E_NOENT:  return "No such file or directory";
     case E_SRCH:   return "No such process";
     case E_IO:     return "I/O error";
+    case E_NOEXEC: return "Exec format error";
     case E_BADF:   return "Bad file descriptor";
     case E_CHILD:  return "No child processes";
     case E_NOMEM:  return "Out of memory";
@@ -244,9 +245,20 @@ static int cmd_help(int argc, char **argv) {
         "  echo [text] [> file | >> file]  write <file> <text>  stat  hexdump\n"
         "  ps  kill <pid>  wait  sleep <ms>  uptime  date  uname  free  mem\n"
         "  cpuinfo  devices  pci  dmesg  mounts  net  clear  help  exit\n"
-        "Programs (spawned in their own address space):\n"
-        "  utest <n>   Ring-3 self tests;  add '&' to run in the background\n");
+        "  exec <program> [args...]  replace this shell with another ELF program\n"
+        "Programs (spawned in their own address space, ELF32 images):\n"
+        "  utest <n>   Ring-3 self tests;  add '&' to run in the background\n"
+        "  /bin/utest <n>  the same program, named by path (ELF loaded by the kernel)\n");
     return 0;
+}
+
+/* `exec prog args...`: replace this shell with `prog`. On failure we are still
+ * the shell, so the error is reported and the prompt comes back. */
+static int cmd_exec(int argc, char **argv) {
+    if (argc < 2) { uputs(2, "usage: exec <program> [args...]\n"); return 1; }
+    argv[argc] = 0;
+    int r = sys_exec(argv[1], (const char *const *)(argv + 1));
+    return fail("exec", argv[1], r);
 }
 
 /* ---- command dispatch ----------------------------------------------------- */
@@ -271,6 +283,7 @@ static int run_builtin(int argc, char **argv, int *found) {
     if (!strcmp(c, "kill"))    return cmd_kill(argc, argv);
     if (!strcmp(c, "sleep"))   return cmd_sleep(argc, argv);
     if (!strcmp(c, "wait"))    return cmd_wait(argc, argv);
+    if (!strcmp(c, "exec"))    return cmd_exec(argc, argv);
     if (!strcmp(c, "help"))    return cmd_help(argc, argv);
     if (!strcmp(c, "clear"))   return sys_clear();
     if (!strcmp(c, "ps"))      return cmd_proc(c, "/proc/tasks");

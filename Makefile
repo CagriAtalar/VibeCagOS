@@ -1,4 +1,6 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-pipe test-proc test-all
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test \
+        test-ring3 test-syscall test-scheduler test-usercopy test-faults \
+        test-stdio test-fs test-shell test-pipe test-proc test-exec test-all
 
 # ============================================================
 # VibeCagOS Build System
@@ -36,7 +38,8 @@ endif
 INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o process.o syscall.o sysfile.o pipe.o progs.o usercopy.o userblob.o \
+OBJS := boot.o interrupts.o process.o elf.o exec.o syscall.o sysfile.o pipe.o \
+        progs.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         vibefs.o vfs.o procfs.o devfs.o \
         kmalloc.o klog.o pmm.o vmm.o \
@@ -66,7 +69,16 @@ interrupts.o: $(KERNEL_DIR)/interrupts.s
 
 
 # ---- kernel pieces split out of kernel.c ----
-process.o: $(KERNEL_DIR)/process.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h src/abi/syscall.h
+process.o: $(KERNEL_DIR)/process.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h \
+           $(KERNEL_DIR)/elf.h src/abi/syscall.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+elf.o: $(KERNEL_DIR)/elf.c $(KERNEL_DIR)/elf.h $(KERNEL_DIR)/vmm.h \
+       $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/kernel.h src/abi/syscall.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+exec.o: $(KERNEL_DIR)/exec.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/elf.h \
+        $(KERNEL_DIR)/sysfile.h $(KERNEL_DIR)/vmm.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 syscall.o: $(KERNEL_DIR)/syscall.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/usercopy.h src/abi/syscall.h
@@ -104,15 +116,20 @@ user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h
 user_%.o: src/user/%.c src/user/ulib.h src/abi/syscall.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
+# User programs are real ELF32 images (src/user/user.ld gives one PT_LOAD per
+# permission class); the kernel ELF loader in src/kernel/elf.c maps them.
 %.elf: user_%.o $(USER_LIB_OBJS) src/user/user.ld
-	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,-Map=$*.map -o $@ $(USER_LIB_OBJS) user_$*.o
+	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,--build-id=none \
+		-Wl,-Map=$*.map -o $@ $(USER_LIB_OBJS) user_$*.o
 
-%.bin: %.elf
-	$(OBJCOPY) -O binary $< $@
-
-# Phase 1 of the plan: embed the user binary in the kernel image.
-userblob.o: $(KERNEL_DIR)/userblob.s $(addsuffix .bin,$(USER_PROGS))
+# Phase 1 of the plan: embed the user ELF images in the kernel image. The same
+# loader path serves filesystem-backed programs, so this is only a staging area.
+userblob.o: $(KERNEL_DIR)/userblob.s $(addsuffix .elf,$(USER_PROGS))
 	$(AS) $(ASFLAGS) -c $< -o $@
+
+# Never let make treat the intermediate user ELFs as deletable: userblob.s
+# `.incbin`s them and the linker needs them to exist.
+.SECONDARY: $(addsuffix .elf,$(USER_PROGS))
 
 # Kernel C files
 kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
@@ -257,7 +274,10 @@ test-pipe: os.iso disk.img
 	@tests/run.sh pipe
 test-proc: os.iso disk.img
 	@tests/run.sh proc
-test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-pipe test-proc
+test-exec: os.iso disk.img
+	@tests/run.sh exec
+test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio \
+          test-fs test-shell test-pipe test-proc test-exec
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img

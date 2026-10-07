@@ -1549,6 +1549,42 @@ static void cmd_gui(void) {
  * ========================================================================= */
 
 
+/*
+ * Install the built-in ELF images into /bin so programs exist as real files.
+ *
+ * Phase 2 of the migration: spawn("utest") still finds the embedded copy, but
+ * "/bin/utest" and "exec /bin/utest" read the file through the VFS, which is
+ * the path the filesystem will use once the binaries live on disk only. Only
+ * missing files are written, so a user's own /bin/utest survives a reboot.
+ */
+static void install_user_programs(void) {
+    vfs_mkdir("/bin", VFS_PERM_DEFAULT_DIR);
+    for (int i = 0; i < user_prog_count; i++) {
+        const struct user_prog *p = &user_progs[i];
+        char path[64];
+        int n = 0;
+        path[n++] = '/'; path[n++] = 'b'; path[n++] = 'i'; path[n++] = 'n'; path[n++] = '/';
+        for (const char *s = p->name; *s && n < (int)sizeof(path) - 1; s++) path[n++] = *s;
+        path[n] = '\0';
+
+        struct vstat st;
+        if (vfs_stat(path, &st) == 0 && st.size > 0) continue;   /* already installed */
+
+        struct file *f = vfs_open(path, FILE_WRITE, 0755);
+        if (!f) {
+            printf("  [WARN] cannot install %s\n", path);
+            continue;
+        }
+        uint32_t len = (uint32_t)(p->end - p->start);
+        int w = vfs_write(f, p->start, len);
+        vfs_close(f);
+        if (w != (int)len)
+            printf("  [WARN] %s: wrote %d of %u bytes\n", path, w, len);
+        else
+            KINFO("INIT", "installed %s (%u bytes)", path, len);
+    }
+}
+
 static int parse_uint(const char **pp) {
     const char *p = *pp;
     while (*p == ' ') p++;
@@ -2015,6 +2051,9 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
         KINFO("PROC", "procfs mounted at /proc");
         print_ok("procfs (/proc)");
     }
+
+    /* Put the built-in ELF programs in /bin so they are reachable by path. */
+    install_user_programs();
 
     /* Mount devfs at /dev */
     devfs_init();

@@ -59,6 +59,16 @@ typedef char _dirent_size_check[
     (sizeof(struct vibefs_dirent) == VIBEFS_DIRENT_SIZE) ? 1 : -1
 ];
 
+/* One inode must be exactly one sector: the inode table is read and written
+ * a sector at a time by index, so a straddling inode would corrupt its
+ * neighbours. */
+typedef char _inode_sector_check[
+    (sizeof(struct vibefs_inode) == VIBEFS_BLOCK_SIZE) ? 1 : -1
+];
+typedef char _inode_fits_check[
+    (15 + 4 * VIBEFS_INODE_BLOCKS <= VIBEFS_BLOCK_SIZE) ? 1 : -1
+];
+
 /* Ensure superblock fits in one sector */
 typedef char _sb_size_check[
     (sizeof(struct vibefs_superblock) == VIBEFS_BLOCK_SIZE) ? 1 : -1
@@ -140,6 +150,7 @@ static uint32_t vibefs_alloc_block(void) {
     /* Mark used blocks */
     static bool used[VIBEFS_DATA_SECTORS];
     memset(used, 0, sizeof(used));
+    if (vibefs.sb.free_blocks == 0) return 0;   /* cheap early out */
 
     for (uint32_t i = 1; i < VIBEFS_MAX_INODES; i++) {
         if (vibefs.inodes[i].ino == 0) continue;

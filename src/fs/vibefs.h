@@ -53,8 +53,19 @@
 #define VIBEFS_BLOCK_SIZE      512u          /* Must match sector size */
 #define VIBEFS_MAX_INODES      128u          /* Inode table capacity */
 #define VIBEFS_ROOT_INO        1u            /* Root directory inode */
-#define VIBEFS_INODE_BLOCKS    16u           /* Direct block pointers per inode */
-                                             /* Max file = 16 * 512 = 8 KiB */
+
+/*
+ * Direct block pointers per inode. The inode struct is padded to exactly one
+ * sector (see struct vibefs_inode) so INODES_PER_SECTOR is 1 and a sector
+ * never straddles two inodes - that keeps the inode table I/O trivial.
+ *
+ *   max file size = VIBEFS_INODE_BLOCKS * 512 = 120 * 512 = 60 KiB
+ *
+ * 60 KiB is what makes ELF user programs storable: sh.elf is ~17 KiB and
+ * utest.elf ~29 KiB, and both have to fit in a single file for exec() to be
+ * able to read them in one go.
+ */
+#define VIBEFS_INODE_BLOCKS    120u
 #define VIBEFS_MAX_FILENAME    55u           /* Bytes, excludes null terminator */
 #define VIBEFS_DIRENT_SIZE     64u           /* Must be power of two */
 #define VIBEFS_DIRENTS_PER_BLK (VIBEFS_BLOCK_SIZE / VIBEFS_DIRENT_SIZE)  /* 8 */
@@ -68,8 +79,14 @@
 /* First data sector */
 #define VIBEFS_DATA_START (1u + VIBEFS_INODE_SECTORS)
 
-/* Total data sectors on a 2 MiB disk (4096 sectors - metadata) */
-#define VIBEFS_DATA_SECTORS    3800u
+/* The disk image is 2 MiB = 4096 sectors (see Makefile's disk.img target). */
+#define VIBEFS_TOTAL_SECTORS   4096u
+
+/* Everything after the superblock and the inode table is data. Derived, not
+ * hard-coded: the inode table grew when VIBEFS_INODE_BLOCKS grew, and a stale
+ * constant here would hand the allocator sectors that overlap the table. */
+#define VIBEFS_DATA_SECTORS \
+    (VIBEFS_TOTAL_SECTORS - VIBEFS_DATA_START)
 
 /* =========================================================================
  * On-disk structures
@@ -90,7 +107,10 @@ struct vibefs_superblock {
     uint8_t  padding[VIBEFS_BLOCK_SIZE - 40];
 } __attribute__((packed));
 
-/* Inode — file/directory metadata */
+/*
+ * Inode — file/directory metadata, padded to exactly VIBEFS_BLOCK_SIZE so
+ * one inode occupies one sector. See VIBEFS_INODE_BLOCKS for why.
+ */
 struct vibefs_inode {
     uint32_t ino;              /* Inode number (0 = free) */
     uint8_t  type;             /* VFS_TYPE_* */
@@ -98,7 +118,9 @@ struct vibefs_inode {
     uint32_t size;             /* Bytes for files, entries count for dirs */
     uint32_t nlink;            /* Hard link count */
     uint32_t blocks[VIBEFS_INODE_BLOCKS];  /* Sector numbers (0 = unused) */
-    uint8_t  padding[4];       /* Pad to make size = 84 bytes */
+    /* 15 bytes of scalar fields (ino/type/mode/size/nlink) + the block array
+     * must be padded out to exactly one sector. */
+    uint8_t  padding[VIBEFS_BLOCK_SIZE - 15 - 4 * VIBEFS_INODE_BLOCKS];
 } __attribute__((packed));
 
 /* Directory entry — stored in data blocks of a directory inode */

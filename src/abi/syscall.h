@@ -36,6 +36,16 @@
  *   SYS_PIPE    (int fds[2]) -> 0    create a pipe; fds[0]=read end, fds[1]=write
  *                                 end, allocated as the two lowest free fds.
  *                                 Writes user buf into the pipe
+ *   SYS_EXEC    (path, argv)         replace THIS process's address space with
+ *                                 the ELF at `path`; fds 0/1/2 are kept, every
+ *                                 other fd is closed. Returns only on failure
+ *                                 (-ENOENT / -EACCES / -ENOEXEC / -ENOMEM ...);
+ *                                 on success it does not return to Ring 3 at
+ *                                 all: the process starts running the new image.
+ *
+ * Program images are ELF32 executables (static, ET_EXEC, PT_LOAD only). A
+ * `path` containing '/' is read through the VFS; a bare name is looked up in
+ * the kernel's built-in program table.
  *
  * File descriptors: per-process table. fd 0 = stdin (console, read only),
  * fd 1 = stdout, fd 2 = stderr (console, write only). New fds are the
@@ -70,7 +80,8 @@
 #define SYS_KILL    24
 #define SYS_CLEAR   25
 #define SYS_PIPE    26
-#define SYS_MAX     26
+#define SYS_EXEC    27
+#define SYS_MAX     27
 
 #define E_PERM    1
 #define E_SRCH    3
@@ -91,6 +102,7 @@
 #define E_NOSYS  38
 #define E_NOTEMPTY 39
 #define E_PIPE  32
+#define E_NOEXEC 8    /* not an ELF executable, or not executable at all */
 
 /* open() flags (Linux-compatible values) */
 #define O_RDONLY   0x000
@@ -142,17 +154,8 @@ struct vibe_info {
  * single process must never write more than this without reading in between. */
 #define VIBE_PIPE_SIZE 4096
 
-/* Flat user image header ("VBIN"), at offset 0 of every user binary.
- * All offsets are relative to USER_BASE. */
+/* User program arguments (see process_create_user's System-V style stack). */
 #define SPAWN_ARGS_MAX 8
 #define SPAWN_ARG_LEN  96
-#define VBIN_MAGIC 0x4E494256u   /* 'V' 'B' 'I' 'N' little endian */
-struct vbin_header {
-    unsigned int magic;
-    unsigned int entry;      /* absolute virtual address */
-    unsigned int text_size;  /* bytes, page aligned: mapped read-only */
-    unsigned int file_size;  /* bytes present in the file */
-    unsigned int mem_size;   /* bytes in memory (>= file_size, rest = bss) */
-};
 
 #endif

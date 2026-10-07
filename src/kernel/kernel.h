@@ -345,6 +345,11 @@ int       process_kill(int pid);
 void      block_on(void *chan);                 /* IF must be 0 */
 void      wakeup(void *chan);
 void      process_tick(struct trap_frame *f);   /* timer hook */
+bool      ustack_write(uint32_t *pd, uint32_t va, const void *src, size_t n);
+uint32_t  kernel_stack_top(struct process *p);
+/* Throw away the current kernel frames and resume Ring 3 through `tf`.
+ * Never returns. Used by SYS_EXEC to enter the freshly loaded image. */
+void      exec_return_to_user(struct trap_frame *tf) __attribute__((noreturn));
 extern struct process procs[];
 extern struct process *current_proc;
 extern struct process *idle_proc;

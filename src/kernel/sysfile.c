@@ -102,7 +102,7 @@ int sys_pipe(int *ufds) {
 }
 
 /* VFS_E* (-1..-11) -> -E_* */
-static int vfs_err(int r) {
+int vfs_err(int r) {
     if (r >= 0) return r;
     switch (r) {
     case VFS_ENOENT:       return -E_NOENT;
@@ -121,7 +121,7 @@ static int vfs_err(int r) {
 }
 
 /* Make `in` absolute against `cwd` and normalise "." / ".." / "//". */
-static int path_resolve(const char *cwd, const char *in, char *out, size_t outsz) {
+int path_resolve(const char *cwd, const char *in, char *out, size_t outsz) {
     char tmp[VFS_PATH_MAX];
     size_t n = 0;
     if (in[0] != '/') {
@@ -394,40 +394,8 @@ int sys_rename(const char *uold, const char *unew) {
 }
 
 /* ---- process control --------------------------------------------------- */
-
-int sys_spawn(const char *uname, const char *const *uargv) {
-    char name[32];
-    int r = strncpy_from_user(name, uname, sizeof(name));
-    if (r < 0) return r == -E_INVAL ? -E_NAMETOOLONG : r;
-    const struct user_prog *prog = user_prog_find(name);
-    if (!prog) return -E_NOENT;
-
-    static char args[SPAWN_ARGS_MAX][SPAWN_ARG_LEN];     /* non-reentrant: syscalls don't preempt */
-    const char *argp[SPAWN_ARGS_MAX];
-    int argc = 0;
-    if (uargv) {
-        for (;; argc++) {
-            if (argc >= SPAWN_ARGS_MAX) return -E_INVAL;
-            const char *up;
-            r = copy_from_user(&up, uargv + argc, sizeof(up));
-            if (r < 0) return r;
-            if (!up) break;
-            r = strncpy_from_user(args[argc], up, SPAWN_ARG_LEN);
-            if (r < 0) return r == -E_INVAL ? -E_NAMETOOLONG : r;
-            argp[argc] = args[argc];
-        }
-    }
-    if (argc == 0) { argp[0] = name; argc = 1; }
-
-    struct process *c = process_create_user(name, prog->start,
-                            (size_t)(prog->end - prog->start), argc, argp);
-    if (!c) return -E_NOMEM;
-    uint32_t fl = irq_save();
-    c->ppid = current_proc->pid;
-    strcpy(c->cwd, current_proc->cwd[0] ? current_proc->cwd : "/");
-    irq_restore(fl);
-    return c->pid;
-}
+/* SYS_SPAWN and SYS_EXEC live in exec.c: both resolve a program image and load
+ * it, and keeping them together makes the one-loader claim checkable. */
 
 int sys_waitpid(int pid, int *ustatus) {
     if (ustatus && !user_range_valid(ustatus, sizeof(int), true)) return -E_FAULT;

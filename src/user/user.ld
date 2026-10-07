@@ -1,26 +1,32 @@
-/* Flat user image linked at USER_BASE. Layout (see abi/syscall.h vbin_header):
- *   [header][text][rodata]  -> pages mapped read-only (text_size, page aligned)
- *   [data][bss]             -> pages mapped read-write
+/* VibeCagOS user program link script (ELF32, i386).
+ *
+ * Produces a real ET_EXEC ELF32 image: one PT_LOAD per permission class, so
+ * the kernel's ELF loader (src/kernel/elf.c) can map code read-only and data
+ * read-write without any special-casing.
+ *
+ *   .text   R+X   at USER_BASE (0x10000000)
+ *   .rodata R     page aligned -> separate PT_LOAD, still read-only
+ *   .data   RW    page aligned -> separate PT_LOAD, writable
+ *   .bss    RW    NOBITS: p_filesz < p_memsz, the loader leaves it zero
+ *
+ * Nothing dynamic, nothing shared: no PT_INTERP, no PT_DYNAMIC, no relocations
+ * at run time. That is what lets elf.c refuse ET_DYN outright.
  */
 ENTRY(_start)
 SECTIONS {
     . = 0x10000000;
-    __image_start = .;
-    .header : {
-        LONG(0x4E494256)                     /* VBIN_MAGIC */
-        LONG(_start)                         /* entry */
-        LONG(__text_end - __image_start)     /* text_size */
-        LONG(__data_end - __image_start)     /* file_size */
-        LONG(__bss_end  - __image_start)     /* mem_size  */
-    }
-    .text   : { *(.text .text.*) }
+
+    .text : { *(.text .text.*) }
+
+    . = ALIGN(0x1000);
     .rodata : { *(.rodata .rodata.*) }
-    . = ALIGN(4096);
-    __text_end = .;
-    .data   : { *(.data .data.*) }
-    __data_end = .;
-    .bss    : { *(.bss .bss.* COMMON) }
-    . = ALIGN(4);
-    __bss_end = .;
-    /DISCARD/ : { *(.interp .dynamic .dynsym .dynstr .hash .gnu.hash .comment .note* .eh_frame* .debug*) }
+
+    . = ALIGN(0x1000);
+    .data : { *(.data .data.*) }
+    .bss  : { *(.bss .bss.* COMMON) }
+
+    /DISCARD/ : {
+        *(.interp) *(.dynamic) *(.dynsym) *(.dynstr) *(.hash)
+        *(.gnu.hash) *(.comment) *(.note*) *(.eh_frame*) *(.note.GNU-stack)
+    }
 }
