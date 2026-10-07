@@ -165,11 +165,14 @@ struct trap_frame {
 #define FD_NONE    0
 #define FD_CONSOLE 1      /* kernel console (TTY): keyboard/serial in, VGA/serial out */
 #define FD_VFS     2      /* open file in the VFS */
+#define FD_PIPE    3      /* pipe end: kernel byte stream between processes */
 struct file;
+struct pipe;
 struct fdent {
     uint8_t      type;    /* FD_* */
     uint8_t      can_read, can_write;
     struct file *file;    /* FD_VFS only */
+    struct pipe *pipe;    /* FD_PIPE: shared pipe object, refcounted by its ends */
 };
 
 struct process {

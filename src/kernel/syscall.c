@@ -52,6 +52,7 @@ void syscall_dispatch(struct trap_frame *f) {
     case SYS_RENAME:  ret = sys_rename((const char *)a1, (const char *)a2); break;
     case SYS_KILL:    ret = sys_kill((int)a1);                   break;
     case SYS_CLEAR:   vga_clear(); ret = 0;                      break;
+    case SYS_PIPE:    ret = sys_pipe((int *)a1);                 break;
     case SYS_GETPID:  ret = current_proc->pid;                   break;
     case SYS_SLEEP:   sleep_ms(a1); ret = 0;                     break;
     case SYS_YIELD:   yield();      ret = 0;                     break;

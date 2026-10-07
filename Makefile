@@ -1,4 +1,4 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-all
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-pipe test-proc test-all
 
 # ============================================================
 # VibeCagOS Build System
@@ -36,7 +36,7 @@ endif
 INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o process.o syscall.o sysfile.o progs.o usercopy.o userblob.o \
+OBJS := boot.o interrupts.o process.o syscall.o sysfile.o pipe.o progs.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         vibefs.o vfs.o procfs.o devfs.o \
         kmalloc.o klog.o pmm.o vmm.o \
@@ -72,10 +72,15 @@ process.o: $(KERNEL_DIR)/process.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h sr
 syscall.o: $(KERNEL_DIR)/syscall.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/usercopy.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-sysfile.o: $(KERNEL_DIR)/sysfile.c $(KERNEL_DIR)/sysfile.h $(KERNEL_DIR)/kernel.h src/abi/syscall.h
+sysfile.o: $(KERNEL_DIR)/sysfile.c $(KERNEL_DIR)/sysfile.h $(KERNEL_DIR)/pipe.h \
+           $(KERNEL_DIR)/kernel.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 progs.o: $(KERNEL_DIR)/progs.c $(KERNEL_DIR)/kernel.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+pipe.o: $(KERNEL_DIR)/pipe.c $(KERNEL_DIR)/pipe.h $(KERNEL_DIR)/kernel.h \
+       $(KERNEL_DIR)/kmalloc.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 usercopy.o: $(KERNEL_DIR)/usercopy.c $(KERNEL_DIR)/usercopy.h $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h
@@ -248,9 +253,11 @@ test-fs: os.iso disk.img
 	@tests/run.sh fs
 test-shell: os.iso disk.img
 	@tests/run.sh shell
+test-pipe: os.iso disk.img
+	@tests/run.sh pipe
 test-proc: os.iso disk.img
 	@tests/run.sh proc
-test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-proc
+test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-pipe test-proc
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img

@@ -34,6 +34,8 @@ static inline int sys_getcwd(char *b, u32 n)                 { return syscall3(S
 static inline int sys_rename(const char *a, const char *b)   { return syscall3(SYS_RENAME, (u32)a, (u32)b, 0); }
 static inline int sys_kill(int pid)                          { return syscall3(SYS_KILL, (u32)pid, 0, 0); }
 static inline int sys_clear(void)                            { return syscall3(SYS_CLEAR, 0, 0, 0); }
+/* Create a pipe; returns 0 and fills fds[0]=read end, fds[1]=write end. */
+static inline int sys_pipe(int *fds)                         { return syscall3(SYS_PIPE, (u32)fds, 0, 0); }
 
 /* ---- tiny libc (ulib.c). No kernel code is reachable from here. ---- */
 typedef unsigned int usize;

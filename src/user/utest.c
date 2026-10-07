@@ -214,6 +214,41 @@ int user_main(int argc, char **argv) {
         puts_("T20: child_spawned="); putint(c > 0); puts_("\n");
         return 0;                      /* exits WITHOUT waiting */
     }
+    case 21: {  /* pipes: round-trip, EOF, short write on a full buffer */
+        int fds[2]; char buf[32];
+        puts_("T21: pipe="); putint(sys_pipe(fds)); puts_("\n");
+        puts_("T21: fds="); putint(fds[0]); puts_(","); putint(fds[1]); puts_("\n");
+        puts_("T21: write="); putint(sys_write(fds[1], "pipe hello", 10)); puts_("\n");
+        int n = sys_read(fds[0], buf, sizeof(buf));
+        puts_("T21: read="); putint(n); puts_(" data=");
+        sys_write(1, buf, (u32)(n > 0 ? n : 0)); puts_("\n");
+
+        /* closing the write end must give the reader EOF (0), not hang */
+        sys_close(fds[1]);
+        puts_("T21: eof_after_close="); putint(sys_read(fds[0], buf, sizeof(buf)) == 0); puts_("\n");
+
+        /* Fill the pipe exactly to capacity: this is the largest write a
+         * single process may make without a concurrent reader, because a
+         * pipe blocks once it is full. */
+        int g[2]; sys_pipe(g);
+        static char big[VIBE_PIPE_SIZE];
+        for (int i = 0; i < VIBE_PIPE_SIZE; i++) big[i] = (char)('a' + (i & 15));
+        int w = sys_write(g[1], big, VIBE_PIPE_SIZE);
+        puts_("T21: full_write="); putint(w == VIBE_PIPE_SIZE); puts_(" w="); putint(w); puts_("\n");
+        sys_close(g[1]);
+        /* everything written before the close must still be readable */
+        static char out[VIBE_PIPE_SIZE];
+        int total = 0, r2;
+        while (total < VIBE_PIPE_SIZE && (r2 = sys_read(g[0], out + total, VIBE_PIPE_SIZE - total)) > 0)
+            total += r2;
+        puts_("T21: drain_ok="); putint(total == VIBE_PIPE_SIZE); puts_(" got="); putint(total); puts_("\n");
+        puts_("T21: eof="); putint(sys_read(g[0], out, 1) == 0); puts_("\n");
+        sys_close(g[0]);
+
+        /* bad pointer must be rejected with EFAULT, not crash the kernel */
+        puts_("T21: badptr="); putint(sys_pipe((int *)0x00100000)); puts_("\n");
+        return 0;
+    }
     case 12: {  /* exit status */
         return 42;
     }

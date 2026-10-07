@@ -20,6 +20,7 @@ case $SUITE in
   proc)      CMDS="free|utest 17 &|ps|kill 3|ps|wait|utest 18|utest 20|ps|kill 8|sleep 300|ps|free" ;;
   fs)        CMDS="utest 15|utest 15|utest 16|ps" ;;
   faults)    CMDS="utest 3|utest 8|utest 9|utest 10|utest 11|utest 0|ps" ;;
+  pipe)      CMDS="utest 21|ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
 
@@ -176,6 +177,17 @@ case $SUITE in
   reject 'SURVIVED'                        'no faulting instruction completed'
   expect 'user page fault at 0x10000008'   'write to RO text page -> fault'
   expect 'T0: hello from ring3'            'system still works after 5 killed processes'
+  reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
+  pipe)
+  expect 'T21: pipe=0'                     'SYS_PIPE succeeds'
+  expect 'T21: fds=3,4'                    'pipe ends get the two lowest free fds'
+  expect 'T21: write=10'                   'write into the pipe'
+  expect 'T21: read=10 data=pipe hello'    'read the bytes back in order'
+  expect 'T21: eof_after_close=1'          'closing the write end yields EOF, not a hang'
+  expect 'T21: full_write=1 w=4096'        'writing exactly the pipe capacity does not block'
+  expect 'T21: drain_ok=1 got=4096'        'all buffered bytes survive the writer closing'
+  expect 'T21: eof=1'                      'drained pipe then reports EOF'
+  expect 'T21: badptr=-14'                 'pipe() with a kernel pointer -> EFAULT'
   reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
 esac
 [ $FAIL -eq 0 ] && echo "  => OK" || { echo "  => FAILED (log kept in /tmp/vibe-last.log)"; cp "$LOG" /tmp/vibe-last.log; }

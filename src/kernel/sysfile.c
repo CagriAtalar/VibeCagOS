@@ -11,6 +11,7 @@
 #include "kernel.h"
 #include "usercopy.h"
 #include "sysfile.h"
+#include "pipe.h"
 #include "klog.h"
 #include "../fs/vfs.h"
 #include "../abi/syscall.h"
@@ -23,17 +24,23 @@ extern int console_read_blocking(char *buf, size_t max);
 
 void fd_init_std(struct process *p) {
     memset(p->fds, 0, sizeof(p->fds));
-    p->fds[0] = (struct fdent){ FD_CONSOLE, 1, 0, NULL };   /* stdin  */
-    p->fds[1] = (struct fdent){ FD_CONSOLE, 0, 1, NULL };   /* stdout */
-    p->fds[2] = (struct fdent){ FD_CONSOLE, 0, 1, NULL };   /* stderr */
+    p->fds[0] = (struct fdent){ FD_CONSOLE, 1, 0, NULL, NULL };   /* stdin  */
+    p->fds[1] = (struct fdent){ FD_CONSOLE, 0, 1, NULL, NULL };   /* stdout */
+    p->fds[2] = (struct fdent){ FD_CONSOLE, 0, 1, NULL, NULL };   /* stderr */
 }
 
 void fd_close_all(struct process *p) {
     for (int i = 0; i < OPEN_MAX; i++) {
         if (p->fds[i].type == FD_VFS && p->fds[i].file)
             vfs_close(p->fds[i].file);
+        else if (p->fds[i].type == FD_PIPE && p->fds[i].pipe) {
+            /* Release the end this descriptor actually held. */
+            if (p->fds[i].can_read) pipe_close_read(p->fds[i].pipe);
+            else                    pipe_close_write(p->fds[i].pipe);
+        }
         p->fds[i].type = FD_NONE;
         p->fds[i].file = NULL;
+        p->fds[i].pipe = NULL;
     }
 }
 
@@ -47,6 +54,51 @@ static int fd_alloc(void) {
     for (int i = 3; i < OPEN_MAX; i++)
         if (current_proc->fds[i].type == FD_NONE) return i;
     return -E_MFILE;
+}
+
+/* Two lowest free descriptors, for SYS_PIPE. Returns 0, or -EMFILE if the
+ * table has fewer than two free slots left. */
+static int fd_alloc2(int *lo, int *hi) {
+    int first = -1;
+    for (int i = 3; i < OPEN_MAX; i++) {
+        if (current_proc->fds[i].type != FD_NONE) continue;
+        if (first < 0) { first = i; continue; }
+        *lo = first; *hi = i;
+        return 0;
+    }
+    return -E_MFILE;
+}
+
+/* Allocate a pipe and bind it to two fresh descriptors of the current process.
+ * Returns the descriptor pair via rd and wr. On failure nothing is bound. */
+static int pipe_bind(int *rd, int *wr) {
+    int r = fd_alloc2(rd, wr);
+    if (r < 0) return r;
+    struct pipe *p = pipe_alloc();
+    if (!p) return -E_NOMEM;
+
+    uint32_t fl = irq_save();
+    current_proc->fds[*rd] = (struct fdent){ FD_PIPE, 1, 0, NULL, p };
+    current_proc->fds[*wr] = (struct fdent){ FD_PIPE, 0, 1, NULL, p };
+    irq_restore(fl);
+    return 0;
+}
+
+int sys_pipe(int *ufds) {
+    if (!user_range_valid(ufds, 2 * sizeof(int), true)) return -E_FAULT;
+
+    int rd, wr;
+    int r = pipe_bind(&rd, &wr);
+    if (r < 0) return r;
+
+    int kfds[2] = { rd, wr };
+    r = copy_to_user(ufds, kfds, sizeof(kfds));
+    if (r < 0) {          /* validated above, so unreachable; stay defensive */
+        sys_close((uint32_t)rd);
+        sys_close((uint32_t)wr);
+        return r;
+    }
+    return 0;
 }
 
 /* VFS_E* (-1..-11) -> -E_* */
@@ -119,6 +171,7 @@ static int get_path(const char *upath, char *kbuf) {
 int sys_write(uint32_t fd, const void *ubuf, uint32_t len) {
     struct fdent *e = fd_get(fd);
     if (!e || !e->can_write) return -E_BADF;
+    if (len == 0) return 0;
 
     char tmp[IO_CHUNK];
     uint32_t done = 0;
@@ -129,6 +182,13 @@ int sys_write(uint32_t fd, const void *ubuf, uint32_t len) {
         if (r < 0) return done ? (int)done : r;
         if (e->type == FD_CONSOLE) {
             for (uint32_t i = 0; i < n; i++) putchar(tmp[i]);
+        } else if (e->type == FD_PIPE) {
+            /* pipe_write may block; it copies through the kernel buffer. */
+            int w = pipe_write(e->pipe, tmp, n);
+            if (w < 0) return done ? (int)done : w;
+            done += (uint32_t)w;
+            if ((uint32_t)w < n) break;           /* short write: pipe was full */
+            continue;
         } else {
             int w = vfs_write(e->file, tmp, n);
             if (w < 0) return done ? (int)done : vfs_err(w);
@@ -153,6 +213,8 @@ int sys_read(uint32_t fd, void *ubuf, uint32_t len) {
     int n;
     if (e->type == FD_CONSOLE) {
         n = console_read_blocking(tmp, len);       /* may block */
+    } else if (e->type == FD_PIPE) {
+        n = pipe_read(e->pipe, tmp, len);          /* may block; 0 = EOF */
     } else {
         n = vfs_read(e->file, tmp, len);
         if (n < 0) return vfs_err(n);
@@ -197,7 +259,7 @@ int sys_open(const char *upath, uint32_t flags, uint32_t mode) {
     if ((f->flags & FILE_DIR) && (vf & FILE_WRITE)) { vfs_close(f); return -E_ISDIR; }
 
     current_proc->fds[fd] = (struct fdent){ FD_VFS, (uint8_t)!!(vf & FILE_READ),
-                                            (uint8_t)!!(vf & FILE_WRITE), f };
+                                            (uint8_t)!!(vf & FILE_WRITE), f, NULL };
     return fd;
 }
 
@@ -205,7 +267,12 @@ int sys_close(uint32_t fd) {
     struct fdent *e = fd_get(fd);
     if (!e) return -E_BADF;
     if (e->type == FD_VFS) vfs_close(e->file);
-    e->type = FD_NONE; e->file = NULL; e->can_read = e->can_write = 0;
+    else if (e->type == FD_PIPE && e->pipe) {
+        if (e->can_read) pipe_close_read(e->pipe);
+        else              pipe_close_write(e->pipe);
+    }
+    e->type = FD_NONE; e->file = NULL; e->pipe = NULL;
+    e->can_read = e->can_write = 0;
     return 0;
 }
 
@@ -237,6 +304,10 @@ int sys_fstat(uint32_t fd, void *ustat) {
     if (!e) return -E_BADF;
     struct vstat st;
     if (e->type == FD_CONSOLE) {
+        memset(&st, 0, sizeof(st));
+        st.type = VFS_TYPE_CHRDEV;
+    } else if (e->type == FD_PIPE) {
+        /* A pipe is not a file: report a FIFO-style character device. */
         memset(&st, 0, sizeof(st));
         st.type = VFS_TYPE_CHRDEV;
     } else {

@@ -33,6 +33,9 @@
  *   SYS_RENAME  (old, new)
  *   SYS_KILL    (pid)               terminates another process
  *   SYS_CLEAR   ()                  clear the console
+ *   SYS_PIPE    (int fds[2]) -> 0    create a pipe; fds[0]=read end, fds[1]=write
+ *                                 end, allocated as the two lowest free fds.
+ *                                 Writes user buf into the pipe
  *
  * File descriptors: per-process table. fd 0 = stdin (console, read only),
  * fd 1 = stdout, fd 2 = stderr (console, write only). New fds are the
@@ -66,7 +69,8 @@
 #define SYS_RENAME  23
 #define SYS_KILL    24
 #define SYS_CLEAR   25
-#define SYS_MAX     25
+#define SYS_PIPE    26
+#define SYS_MAX     26
 
 #define E_PERM    1
 #define E_SRCH    3
@@ -86,6 +90,7 @@
 #define E_NAMETOOLONG 36
 #define E_NOSYS  38
 #define E_NOTEMPTY 39
+#define E_PIPE  32
 
 /* open() flags (Linux-compatible values) */
 #define O_RDONLY   0x000
@@ -124,6 +129,18 @@ struct vibe_info {
     unsigned int ticks;
     unsigned int uptime_ms;
 };
+
+/* Written into the user's int[2] by SYS_PIPE. */
+#define VIBE_PIPE_R 0
+#define VIBE_PIPE_W 1
+
+/* Pipe buffer capacity in bytes. Part of the ABI so that user programs can
+ * size their writes; the kernel's struct pipe uses the same value.
+ *
+ * A pipe is a BLOCKING byte stream: writing more than VIBE_PIPE_SIZE bytes
+ * into a pipe with no concurrent reader blocks until a reader drains it, so a
+ * single process must never write more than this without reading in between. */
+#define VIBE_PIPE_SIZE 4096
 
 /* Flat user image header ("VBIN"), at offset 0 of every user binary.
  * All offsets are relative to USER_BASE. */
