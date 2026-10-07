@@ -44,15 +44,15 @@
  *                                 end, allocated as the two lowest free fds.
  *                                 Writes user buf into the pipe
  *   SYS_EXEC    (path, argv)         replace THIS process's address space with
- *                                 the ELF at `path`; fds 0/1/2 are kept, every
+ *                                 the VBIN at `path`; fds 0/1/2 are kept, every
  *                                 other fd is closed. Returns only on failure
  *                                 (-ENOENT / -EACCES / -ENOEXEC / -ENOMEM ...);
  *                                 on success it does not return to Ring 3 at
  *                                 all: the process starts running the new image.
  *
- * Program images are ELF32 executables (static, ET_EXEC, PT_LOAD only). A
- * `path` containing '/' is read through the VFS; a bare name is looked up in
- * the kernel's built-in program table.
+ * Program images are VBIN executables (docs/VBIN.md). A `path` containing '/'
+ * is read through the VFS; a bare name tries `/bin/<name>` first, then the
+ * kernel's built-in program table.
  *
  * File descriptors: per-process table. fd 0 = stdin (console, read only),
  * fd 1 = stdout, fd 2 = stderr (console, write only). New fds are the
@@ -110,7 +110,7 @@
 #define E_NOSYS  38
 #define E_NOTEMPTY 39
 #define E_PIPE  32
-#define E_NOEXEC 8    /* not an ELF executable, or not executable at all */
+#define E_NOEXEC 8    /* not a VBIN executable, or not executable at all */
 
 /* open() flags (Linux-compatible values) */
 #define O_RDONLY   0x000

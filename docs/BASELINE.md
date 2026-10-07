@@ -1,7 +1,7 @@
 # VibeCagOS — Build, Run and Test Reference
 
-> **Updated:** 2026-10-07, against the tree that includes the ELF loader and
-> `exec()`. Verified with clang/lld/GRUB/QEMU in WSL2 Ubuntu.
+> **Updated:** 2026-10-07, against the tree with the VBIN loader and `exec()`.
+> Verified with clang/lld/GRUB/QEMU in WSL2 Ubuntu.
 
 ## Requirements
 
@@ -24,13 +24,15 @@ The build produces three kinds of artifact:
 | Artifact | Built from | Loaded by |
 |---|---|---|
 | `kernel.elf` | `src/kernel`, `src/drivers`, `src/fs`, `src/net` | GRUB |
-| `sh.elf`, `utest.elf` | `src/user` via `src/user/user.ld` | the kernel's ELF loader |
+| `*.elf` (intermediate) | `src/user` via `src/user/user.ld` | `tools/vbinpack` (host) |
+| `*.vbin` (runtime) | `*.elf` via `tools/vbinpack` | the kernel's VBIN loader |
 | `os.iso` | `kernel.elf` + a GRUB menu | `grub-mkrescue` |
 
-The user ELFs are additionally `.incbin`'d into the kernel image
+The user VBINs are additionally `.incbin`'d into the kernel image
 (`src/kernel/userblob.s`) so a build boots without a pre-populated disk; the
-kernel copies them into `/bin` at boot, after which programs are also reachable
-as ordinary files.
+kernel copies them into `/bin` (`/sbin` for init) at boot, after which programs
+are also reachable as ordinary files. Explicit stages: `make kernel`,
+`make user`, `make tools`, `make image`.
 
 ## Run
 
@@ -57,7 +59,7 @@ make test-fs            # open/read/write/lseek/stat/mkdir/unlink/readdir
 make test-shell         # the user shell's filesystem commands
 make test-pipe          # pipes: round trip, EOF, full buffer
 make test-proc          # spawn/wait/kill/zombies/orphans, frame-leak check
-make test-exec          # ELF loading, exec(), argv and fd rules
+make test-exec          # VBIN loading, malformed images, exec(), argv and fd rules
 ```
 
 `tests/run.sh <suite>` boots QEMU headless, types commands into the **user**

@@ -163,17 +163,19 @@ suite — NULL, kernel address, unmapped, wrap, cross-page, read-only)*
 
 ## 10. Programs and filesystems
 
-User programs are ELF32 executables (`src/user/user.ld`, one `PT_LOAD` per
-permission class). `src/kernel/elf.c` loads them; it validates the header, every
-program header against the real image size and the user window, copies
-`p_filesz`, leaves `.bss` zero, and demotes pages no `PF_W` segment covers.
-`ET_DYN` is refused, so there is no PIC and no dynamic linker.
+User programs are VBIN executables (docs/VBIN.md): a 28-byte header, a
+read-only text blob and a read-write data blob. Host ELF is a build
+intermediate only — `tools/vbinpack` converts the linked output and the kernel
+has no ELF loader. `src/kernel/vbin.c` validates the header against the real
+image size and the user window, maps text RO and data RW, copies exactly the
+file-backed bytes, and leaves BSS zero.
 
 `spawn("name")` uses the built-in table (`progs.c`, images `.incbin`'d into the
 kernel); `spawn("/bin/x")` and `exec("/bin/x")` read the file through the VFS.
-Both end in the same `elf_load()`. `exec` replaces the address space and CR3,
+Both end in the same `vbin_load()`. `exec` replaces the address space and CR3,
 keeps fds 0/1/2, closes the rest, and enters the new image through a fresh iret
-frame on the kernel stack. *(verified: `exec` suite)*
+frame on the kernel stack. *(verified: `exec` suite, including 12 malformed
+images that must all fail with `-ENOEXEC` without harming the caller)*
 
 VFS layer over VibeFS (inode/directory tree on the IDE disk), procfs (`/proc`)
 and devfs (`/dev`).
@@ -242,6 +244,7 @@ Ring-3 processes, EOF when the writer exits, `ls /bin | cat`)*
 
 Milestones 0–14 of the plan are done and covered by tests; see
 `docs/ROADMAP.md` for what is left. The two structural items that were still
-open when this audit was first written — the ELF loader and `exec` — landed in
-the commit "exec: ELF32 loader, filesystem-backed programs and SYS_EXEC", and
-fd inheritance plus the first non-shell utilities followed.
+open when this audit was first written — the executable loader and `exec` —
+landed as an ELF loader first ("exec: ELF32 loader...") and was then
+consolidated into the native VBIN format ("vbin: ..."), with fd inheritance
+and the first non-shell utilities in between.

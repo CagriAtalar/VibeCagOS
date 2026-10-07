@@ -1,24 +1,20 @@
 /* VibeCagOS user program link script (ELF32, i386).
  *
- * Produces a real ET_EXEC ELF32 image: one PT_LOAD per permission class, so
- * the kernel's ELF loader (src/kernel/elf.c) can map code read-only and data
- * read-write without any special-casing.
+ * This ELF is a BUILD intermediate only: tools/vbinpack converts it to VBIN,
+ * which is what the kernel loads (docs/VBIN.md). Layout rules the packer
+ * relies on:
  *
- *   .text   R+X   at USER_BASE (0x10000000)
- *   .rodata R     page aligned -> separate PT_LOAD, still read-only
- *   .data   RW    page aligned -> separate PT_LOAD, writable
- *   .bss    RW    NOBITS: p_filesz < p_memsz, the loader leaves it zero
+ *   .text + .rodata   contiguous from USER_BASE (0x10000000), read-only
+ *   .data + .bss       page aligned after that, read-write
  *
  * Nothing dynamic, nothing shared: no PT_INTERP, no PT_DYNAMIC, no relocations
- * at run time. That is what lets elf.c refuse ET_DYN outright.
+ * at run time. vbinpack refuses ET_DYN outright.
  */
 ENTRY(_start)
 SECTIONS {
     . = 0x10000000;
 
     .text : { *(.text .text.*) }
-
-    . = ALIGN(0x1000);
     .rodata : { *(.rodata .rodata.*) }
 
     . = ALIGN(0x1000);

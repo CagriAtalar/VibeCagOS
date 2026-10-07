@@ -1,6 +1,6 @@
 /*
  * ls - list directory contents. An ordinary user program: it lives in /bin,
- * is loaded by the kernel's ELF loader and talks to the kernel only through
+ * is loaded by the kernel's VBIN loader and talks to the kernel only through
  * int 0x80. It includes no kernel header.
  *
  *   ls [-l] [dir]

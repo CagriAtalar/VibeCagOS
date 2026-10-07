@@ -1544,13 +1544,13 @@ static void cmd_gui(void) {
 
 /* =========================================================================
  * User-mode test launcher (KSHELL_DEBUG commands: utest / utest2 / uspawn)
- * The embedded ELF32 image built from src/user/utest.c is linked in as data;
+ * The embedded VBIN image built from src/user/utest.c is linked in as data;
  * it runs in Ring 3 and talks to the kernel only via int 0x80.
  * ========================================================================= */
 
 
 /*
- * Install the built-in ELF images as real files so the filesystem is the
+ * Install the built-in VBIN images as real files so the filesystem is the
  * authoritative source of programs: /sbin/init for the first user process,
  * /bin/<name> for everything else. Only missing files are written, so a
  * user's own /bin/utest survives a reboot (and deleting one from the disk
@@ -2060,7 +2060,7 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
         print_ok("procfs (/proc)");
     }
 
-    /* Put the built-in ELF programs in /bin so they are reachable by path. */
+    /* Put the built-in VBIN programs in /bin so they are reachable by path. */
     install_user_programs();
 
     /* Mount devfs at /dev */

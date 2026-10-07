@@ -18,6 +18,7 @@ static void busy(volatile unsigned n) { while (n--) ; }
 
 static const char rodata_probe[16] = "ro";   /* lives in read-only pages */
 static volatile int data_probe = 1234;        /* read-write page */
+static int bss_probe;                         /* BSS: loader must zero this */
 
 int user_main(int argc, char **argv) {
     int test = argc > 1 ? atoi(argv[1]) : -1;
@@ -38,10 +39,11 @@ int user_main(int argc, char **argv) {
         puts_("T1: write_badfd="); putint(sys_write(7, "x", 1)); puts_("\n");
         return 0;
     }
-    case 2: {   /* user data/rodata are readable, data is writable */
+    case 2: {   /* user data/rodata are readable, data is writable, BSS is zero */
         data_probe++;
-        puts_("T2: data="); putint(data_probe); puts_(" ro0="); putint(rodata_probe[0]); puts_("\n");
-        return 0;
+        puts_("T2: data="); putint(data_probe); puts_(" ro0="); putint(rodata_probe[0]);
+        puts_(" bss0="); putint(bss_probe); puts_("\n");
+        return bss_probe != 0;
     }
     case 3: {   /* Ring 3 reads kernel memory -> page fault, only we die */
         puts_("T3: before kernel read\n");
@@ -188,8 +190,11 @@ int user_main(int argc, char **argv) {
         const char *a1[] = { "utest", "12", 0 };
         const char *a2[] = { "utest", "0", 0 };
         int p1 = sys_spawn("utest", a1), p2 = sys_spawn("utest", a2);
-        puts_("T18: spawned="); putint(p1 > 0 && p2 > 0 && p1 != p2); puts_("\n");
+        int ok = p1 > 0 && p2 > 0 && p1 != p2;
         int st1 = -1, st2 = -1, r1 = sys_waitpid(p1, &st1), r2 = sys_waitpid(-1, &st2);
+        /* Print only after both children are reaped: while they are alive
+         * their own output can interleave ours on the serial line. */
+        puts_("T18: spawned="); putint(ok); puts_("\n");
         puts_("T18: wait1="); putint(r1 == p1); puts_(" st1="); putint(st1);
         puts_(" wait2="); putint(r2 == p2); puts_(" st2="); putint(st2); puts_("\n");
         puts_("T18: no_more_children="); putint(sys_waitpid(-1, &st1)); puts_("\n");
@@ -274,7 +279,7 @@ int user_main(int argc, char **argv) {
     case 24: {  /* exec rejections: each must fail cleanly, leaving us alive */
         puts_("T24: missing="); putint(sys_exec("/nope", 0)); puts_("\n");
         puts_("T24: dir="); putint(sys_exec("/proc", 0)); puts_("\n");
-        /* a text file is not an ELF executable */
+        /* a text file is not a VBIN executable */
         int fd = sys_open("/etc/version", O_RDONLY, 0);
         puts_("T24: open_text="); putint(fd >= 3); puts_("\n");
         if (fd >= 3) sys_close(fd);
@@ -282,6 +287,51 @@ int user_main(int argc, char **argv) {
         puts_("T24: badptr="); putint(sys_exec((const char *)0x00100000, 0)); puts_("\n");
         puts_("T24: alive\n");
         return 0;
+    }
+    case 27: {  /* malformed VBIN images: exec must fail cleanly, never harm us */
+        /* VBIN header words: magic version entry text data mem flags */
+        static const unsigned good[7] =
+            { 0x4E494256u, 1, 0x10000000u, 0x1000, 0, 0x1000, 0 };
+        static unsigned bad[7];
+        static char payload[0x1000];
+        for (unsigned i = 0; i < sizeof(payload); i++) payload[i] = (char)('A' + (i & 15));
+        int fails = 0;
+        /* each row: {word to corrupt, corrupt value, payload bytes, tag} */
+        static const struct { int idx; unsigned val; unsigned pay; const char *tag; } rows[] = {
+            { 0, 0xDEADBEEFu, 64, "magic" },     /* bad magic */
+            { -1, 0, 10, "trunc" },              /* truncated header */
+            { 1, 2, 64, "version" },             /* bad version */
+            { 6, 1, 64, "flags" },               /* bad flags */
+            { 5, 0, 64, "mem0" },                /* mem_size == 0 */
+            { 5, 0x2000000u, 0x1000, "memhuge" },/* mem_size past the 1 MiB cap */
+            { 3, 0, 64, "text0" },               /* empty text */
+            { 2, 0x00100000u, 64, "entrykern" }, /* entry below USER_BASE */
+            { 2, 0x10001000u, 64, "entrydata" }, /* entry in data, not text */
+            { 3, 0x2000, 64, "textover" },       /* text past end of file */
+            { 4, 0x2000, 64, "dataover" },       /* text+data past end of file */
+            { 5, 0x100, 64, "memsmall" },        /* text+data larger than mem */
+        };
+        for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            for (int w = 0; w < 7; w++) bad[w] = good[w];
+            if (rows[i].idx >= 0) bad[rows[i].idx] = rows[i].val;
+            char path[16] = "/t27-0.vbn";
+            path[5] = (char)('a' + i);
+            int fd = sys_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            if (fd < 0) { puts_("T27: open fail\n"); return 1; }
+            sys_write(fd, bad, rows[i].idx == -1 ? 10 : (u32)sizeof(bad));
+            if (rows[i].pay > (rows[i].idx == -1 ? 10 : sizeof(bad)))
+                sys_write(fd, payload, rows[i].pay - (rows[i].idx == -1 ? 10 : sizeof(bad)));
+            sys_close(fd);
+            int r = sys_exec(path, 0);
+            puts_("T27: "); puts_(rows[i].tag); puts_("=");
+            putint(r); puts_("\n");
+            if (r != -8) fails++;
+            sys_unlink(path);
+        }
+        puts_("T27: bad_rejected="); putint(fails == 0); puts_("\n");
+        /* a good image still loads after all that rejection */
+        puts_("T27: alive\n");
+        return fails != 0;
     }
     case 25: {  /* pipeline writer: everything on fd 1 goes into the pipe */
         puts_("T25: sent\n");

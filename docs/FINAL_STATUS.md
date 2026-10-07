@@ -37,7 +37,7 @@
 | Per-process page directories | done | kernel PDEs shared, user PDEs private |
 | Kernel heap (kmalloc/kfree/coalesce/aligned) | done | `heap`, `/proc/meminfo` |
 | User pages confined to `[USER_BASE, USER_END)` | done | enforced in `vmm_map_page` |
-| ELF32 loader, R/W/X per `PT_LOAD` | done | `src/kernel/elf.c`, `test-exec` |
+| VBIN loader, text RO / data RW / BSS zero | done | `src/kernel/vbin.c`, `tools/vbinpack`, `test-exec` |
 | Physical memory discovery | not done | 64 MiB pool is a linker constant |
 | Copy-on-write, demand paging, PAE/NX | not done | out of scope for this milestone |
 
@@ -84,11 +84,11 @@
 |---|---|---|
 | User-space shell (`sh`) as an ordinary Ring-3 process | done | `kernel_main` no longer calls `run_shell` |
 | Shell uses only syscalls, includes no kernel header | done | |
-| ELF user programs in `/bin` + `/sbin/init` | done | installed at boot; disk is authoritative, embedded is fallback |
+| VBIN user programs in `/bin` + `/sbin/init` | done | packed by `vbinpack`, installed at boot; disk is authoritative, embedded is fallback |
 | Ring-3 init (`/sbin/init` spawns `/bin/sh`, propagates status) | done | boot is kinit → init → sh |
 | Pipes as the first IPC primitive | done | `test-pipe` |
 | fd inheritance at spawn (`SYS_SPAWNFDS`), shell pipelines `\|` | done | `ls /bin \| cat` |
-| Utilities as separate ELF programs (`ls`, `cat`, `echo`) | done | milestone 14 |
+| Utilities as separate VBIN programs (`ls`, `cat`, `echo`) | done | milestone 14 |
 | `mkdir`, `rm`, `cp`, `stat`, `ps`, `head`, `hexdump` still builtins | not done | low priority |
 | Programs still embedded in the kernel image | staging | see roadmap |
 
@@ -109,5 +109,5 @@
 `scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `pipe`, `proc`,
 `exec`. They assert privilege level, register state, preemption without yield,
 pointer validation, page-fault containment, fd semantics, filesystem round
-trips, pipelines, zombie/orphan lifetime and ELF/exec behaviour — not just that
+trips, pipelines, zombie/orphan lifetime and VBIN/exec behaviour — not just that
 the OS boots.

@@ -1,10 +1,10 @@
 /*
- * Built-in user programs, embedded in the kernel image (Phase 1 staging).
+ * Built-in user programs, embedded in the kernel image (staging only).
  *
- * Each entry is a separately built ELF32 executable (src/user, Makefile),
- * loaded by the ELF loader in elf.c. This table only says where the bytes
- * live; the loading itself is the same code path a filesystem program uses,
- * so switching SYS_SPAWN over to the VFS does not touch the loader.
+ * Each entry is a VBIN executable packed by tools/vbinpack (src/user,
+ * Makefile) and loaded by the VBIN loader in vbin.c. This table only says
+ * where the bytes live; the loading itself is the same code path a
+ * filesystem program uses.
  */
 #include "kernel.h"
 

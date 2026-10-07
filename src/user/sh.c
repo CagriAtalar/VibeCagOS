@@ -10,7 +10,7 @@
  * Redirection (`>`, `>>`) and pipelines (`|`) work for programs as well as for
  * builtins, because SYS_SPAWNFDS can hand a child the caller's descriptors.
  *
- * ls, cat and echo are NOT builtins: they are separate ELF programs in /bin,
+ * ls, cat and echo are NOT builtins: they are separate VBIN programs in /bin,
  * which is why `utest 25 | cat` is a real two-process pipeline.
  */
 #include "ulib.h"
@@ -185,12 +185,12 @@ static int cmd_help(int argc, char **argv) {
         "  cd [dir]  pwd  mkdir  rmdir  touch  rm  mv  cp  head [-n N]  write  stat\n"
         "  hexdump  ps  kill <pid>  wait  sleep <ms>  clear  help  exit\n"
         "  uptime  date  uname  free  mem  cpuinfo  devices  pci  dmesg  mounts  net\n"
-        "  exec <program> [args...]   replace this shell with another ELF program\n"
+        "  exec <program> [args...]   replace this shell with another program\n"
         "Syntax:\n"
         "  cmd > file   cmd >> file   redirection (builtins and programs)\n"
         "  cmd1 | cmd2  pipelines between programs, e.g. utest 25 | cat\n"
         "  cmd &        run in the background; 'wait' reaps them\n"
-        "Programs in /bin (separate ELF images, own address space):\n"
+        "Programs in /bin (separate images, own address space):\n"
         "  ls [-l] [dir]   cat [file...]   echo [text]   utest <n>\n");
     return 0;
 }

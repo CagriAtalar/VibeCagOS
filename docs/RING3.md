@@ -5,7 +5,7 @@
 | Range | Use | Access |
 |---|---|---|
 | `0 .. __free_ram_end` (~65 MB) | kernel, identity mapped, page tables **shared** by all processes | supervisor only |
-| `0x10000000` `USER_BASE` | user image: one `PT_LOAD` per ELF permission class | user |
+| `0x10000000` `USER_BASE` | user image: VBIN text (RO) + data (RW) + BSS | user |
 | `0x1FFFC000 .. 0x20000000` | user stack, 4 pages, page below unmapped (guard) | user RW |
 | `.. 0xC0000000` `USER_END` | reserved for user heap | user |
 | `0xC0000000 ..` | kernel-only (MMIO) | supervisor |
@@ -137,22 +137,24 @@ reader would never see EOF.
 
 ## Programs as separate files (M14)
 
-`ls`, `cat` and `echo` are no longer shell builtins: they are ELF programs in
-`/bin` (`src/user/{ls,cat,echo}.c`), loaded by the same ELF loader and spawned
+`ls`, `cat` and `echo` are no longer shell builtins: they are VBIN programs in
+`/bin` (`src/user/{ls,cat,echo}.c`), loaded by the same VBIN loader and spawned
 like anything else. `cat` with no arguments reads fd 0, so `utest 25 | cat` is a
 genuine two-process pipeline.
 
-## ELF32 programs and exec (M12)
+## VBIN programs and exec (M12, consolidated)
 
-User programs are ELF32 executables, not flat blobs. `src/user/user.ld` gives one
-`PT_LOAD` per permission class (`.text` R+X, `.rodata` R, `.data`/`.bss` RW), so
-the loader needs no special cases and no dynamic linker (`ET_DYN` is refused).
+User programs are VBIN executables (docs/VBIN.md): a 28-byte header plus a
+read-only text blob and a read-write data blob. Host ELF appears only as a
+build intermediate that `tools/vbinpack` converts; the kernel has no ELF
+loader. There is deliberately no dynamic linking, no PIC, no relocations.
 
-`src/kernel/elf.c` validates the header and every program header against the real
-image size and the user window, maps the segments, copies `p_filesz` bytes, and
-demotes pages that no `PF_W` segment covers back to read-only (`.bss` is left
-zero because `pmm` hands out zeroed frames). `PF_X` is parsed but **not**
-enforced: 32-bit paging without PAE has no NX bit.
+`src/kernel/vbin.c` validates the header against the real image size and the
+user window with overflow-safe arithmetic, maps text `PRESENT|USER` and data
+`PRESENT|USER|WRITABLE`, copies exactly the file-backed bytes, and leaves BSS
+zero (the PMM hands out zeroed frames — and unlike the old ELF loader, nothing
+is ever copied past a blob's file extent). Execute protection beyond R/W does
+not exist: 32-bit paging without PAE has no NX bit.
 
 Two entry points, one loader:
 
@@ -164,10 +166,10 @@ programs exist as ordinary files on a plain `disk.img`.
 
 `exec()` (in `exec.c`) replaces the calling process's address space:
 
-1. read + validate the ELF into a scratch buffer — nothing is mapped yet, so a
-   bad path or a bad ELF returns `-ENOENT`/`-EACCES`/`-ENOEXEC` and the caller
+1. read + validate the VBIN into a scratch buffer — nothing is mapped yet, so a
+   bad path or a bad image returns `-ENOENT`/`-EACCES`/`-ENOEXEC` and the caller
    keeps running
-2. build a new address space, load the ELF, map a fresh user stack
+2. build a new address space, load the VBIN, map a fresh user stack
 3. keep fds 0/1/2, close everything else (POSIX)
 4. swap `current_proc->page_table` and `CR3`, then free the old directory
 5. `exec_return_to_user()` builds the same "return into `trapret`" frame a new

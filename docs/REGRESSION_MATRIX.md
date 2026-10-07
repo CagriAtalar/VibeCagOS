@@ -30,10 +30,10 @@
 | RTL8139 / ARP / IPv4 / ICMP | works | works (unchanged) | none automated | polling NIC, QEMU lossy ping |
 | UDP / DNS | works | works (unchanged) | none automated | kernel-shell commands only, no socket syscalls |
 | ACPI poweroff | works | works (kinit path) | every suite ends with `exit` | — |
-| ELF loader + spawn/exec | none (VBIN idea) | ELF32, FS-first + embedded fallback | `exec`, `proc` | 512 KiB image cap, `PF_X` unenforced |
+| VBIN loader + spawn/exec | ELF32 runtime loader | VBIN only, FS-first + embedded fallback | `exec`, `proc` | 512 KiB image cap, 1 MiB span cap, no NX |
 | Pipes | none | blocking byte stream, EOF | `pipe` | no `O_NONBLOCK` |
 | Shell (Ring-3) | Ring-0 `run_shell` | `/bin/sh` + `/sbin/init`, syscalls only | `shell`, `pipe` | some builtins remain (see audit #4) |
-| `ls` / `cat` / `echo` | shell builtins | separate `/bin` ELFs | `pipe`, `exec` | — |
+| `ls` / `cat` / `echo` | shell builtins | separate `/bin` VBINs | `pipe`, `exec` | — |
 | GUI desktop | kernel Mode-13h demo | unchanged demo | none automated | still Ring 0 (milestone 15) |
 
 ## How to read a failure

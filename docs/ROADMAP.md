@@ -23,7 +23,7 @@
 | 9 | Per-process fd tables | done | `test-stdio`, `test-fs` |
 | 10 | Userspace shell | done | `test-shell` |
 | 11 | spawn / wait / exec | done | `test-proc`, `test-exec` |
-| 12 | ELF32 loader + filesystem programs | done | `test-exec` |
+| 12 | VBIN loader + filesystem programs (consolidated from ELF32) | done | `test-exec` |
 | 13 | Pipes (IPC primitive) | done | `test-pipe` |
 | 14 | Userspace utilities | done | `ls`, `cat`, `echo` are /bin programs |
 | 14b | Ring-3 init + disk-first loading | done | `/sbin/init` spawns `/bin/sh`; bare names try `/bin` first |

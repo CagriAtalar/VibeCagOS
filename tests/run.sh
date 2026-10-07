@@ -24,7 +24,7 @@ case $SUITE in
   fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
   pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
-  exec)      CMDS="ls /bin@ls -l /bin@utest 24@utest 22@ps" ;;
+  exec)      CMDS="ls /bin@ls -l /bin@utest 24@utest 27@utest 22@ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
 
@@ -74,7 +74,7 @@ case $SUITE in
   expect 'T1: uptime_ok=1'                 'SYS_UPTIME'
   expect 'T1: invalid_syscall=-38'         'invalid syscall -> -ENOSYS'
   expect 'T1: write_badfd=-9'              'bad fd -> -EBADF'
-  expect 'T2: data=1235 ro0=114'           'RW data page + RO text page readable'
+  expect 'T2: data=1235 ro0=114 bss0=0'    'RW data + RO text readable, BSS zeroed by loader'
   expect 'T6: slept_ok=1'                  'SYS_SLEEP ~300ms then wakeup' ;;
  scheduler)
   expect 'A+B+A|B+A+B'                     'A and B interleave without yield (preemption)'
@@ -199,13 +199,22 @@ case $SUITE in
   expect 'T1: getpid=1'                   'stdout redirected into /redir.txt (cat reads it back)'
   reject 'KERNEL PANIC|EXCEPTION'          'no kernel panic' ;;
   exec)
-  expect '^-  utest'                        'ELF programs installed in /bin'
+  expect '^-  utest'                        'VBIN programs installed in /bin'
   expect '^- 755 +[0-9]+ +utest'            'ls -l on a separate program: mode and size come from stat()'
   expect 'T24: missing=-2'                 'exec of a missing file -> ENOENT'
   expect 'T24: dir=-21'                    'exec of a directory -> EISDIR'
-  expect 'T24: notelf=-8'                  'exec of a non-ELF file -> ENOEXEC'
+  expect 'T24: notelf=-8'                  'exec of a non-VBIN file -> ENOEXEC'
   expect 'T24: badptr=-14'                 'exec with a kernel pointer -> EFAULT'
   expect 'T24: alive'                      'process survives every rejected exec'
+  expect 'T27: magic=-8'                   'bad VBIN magic rejected'
+  expect 'T27: trunc=-8'                   'truncated VBIN header rejected'
+  expect 'T27: version=-8'                 'bad VBIN version rejected'
+  expect 'T27: flags=-8'                   'bad VBIN flags rejected'
+  expect 'T27: memhuge=-8'                 'oversized VBIN image rejected'
+  expect 'T27: entrykern=-8'               'VBIN entry below USER_BASE rejected'
+  expect 'T27: entrydata=-8'               'VBIN entry outside text rejected'
+  expect 'T27: bad_rejected=1'             'all 12 malformed images rejected'
+  expect 'T27: alive'                      'process intact after 12 bad execs'
   expect 'T22: open_fd=3'                  'fd 3 allocated before exec'
   expect 'T23: argc=3 argv0=/bin/utest argv1=23 argv2=extra' 'exec passes argv'
   expect 'T23: leaked_fd=-9'               'exec closed everything but fd 0/1/2'

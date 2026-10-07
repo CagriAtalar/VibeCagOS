@@ -61,7 +61,7 @@
  *
  *   max file size = VIBEFS_INODE_BLOCKS * 512 = 120 * 512 = 60 KiB
  *
- * 60 KiB is what makes ELF user programs storable: sh.elf is ~17 KiB and
+ * 60 KiB is what makes VBIN user programs storable: sh is ~12 KiB and
  * utest.elf ~29 KiB, and both have to fit in a single file for exec() to be
  * able to read them in one go.
  */

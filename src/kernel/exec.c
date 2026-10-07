@@ -3,8 +3,8 @@
  *
  * Two paths, one loader:
  *
- *   spawn "name"      -> built-in embedded ELF (progs.c)   [Phase 1 staging]
- *   spawn "/bin/x"    -> read the file through the VFS, then the ELF loader
+ *   spawn "name"      -> built-in embedded VBIN (progs.c)   [staging only]
+ *   spawn "/bin/x"    -> read the file through the VFS, then the VBIN loader
  *   exec  "/bin/x"    -> replace THIS process's address space, like POSIX
  *
  * exec() is the interesting one. It runs on the caller's kernel stack, inside
@@ -12,9 +12,9 @@
  * context has to be built on a kernel stack the current C frames are not
  * using. It therefore:
  *
- *   1. reads and validates the ELF into a scratch buffer (nothing is mapped
+ *   1. reads and validates the VBIN into a scratch buffer (nothing is mapped
  *      yet, so a bad image just returns an error and leaves us untouched)
- *   2. builds a brand-new address space and loads the ELF into it
+ *   2. builds a brand-new address space and loads the VBIN into it
  *   3. reads the file's fds into the new space and closes everything else
  *   4. swaps current_proc->page_table and CR3 over
  *   5. throws away the current kernel stack frame and returns into a
@@ -27,7 +27,7 @@
 #include "kernel.h"
 #include "vmm.h"
 #include "pmm.h"
-#include "elf.h"
+#include "vbin.h"
 #include "klog.h"
 #include "sysfile.h"
 #include "usercopy.h"
@@ -235,7 +235,7 @@ int sys_exec(const char *upath, const char *const *uargv) {
     if (r < 0) return r;
 
     /* Read the image first: everything above this point is side-effect free,
-     * so a bad path or a bad ELF leaves the current process running. */
+     * so a bad path or a bad VBIN leaves the current process running. */
     char path[VFS_PATH_MAX];
     r = path_resolve(current_proc->cwd[0] ? current_proc->cwd : "/",
                      path_in, path, sizeof(path));
@@ -260,8 +260,8 @@ int sys_exec(const char *upath, const char *const *uargv) {
     if (!pd) return -E_NOMEM;
 
     uint32_t entry = 0;
-    if (elf_load(pd, exec_image, (size_t)n, &entry) < 0) {
-        KWARN("EXEC", "pid %d: %s rejected: %s", current_proc->pid, path, elf_error());
+    if (vbin_load(pd, exec_image, (size_t)n, &entry) < 0) {
+        KWARN("EXEC", "pid %d: %s rejected: %s", current_proc->pid, path, vbin_error());
         vmm_destroy_address_space(pd);
         return -E_NOEXEC;
     }

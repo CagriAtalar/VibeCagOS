@@ -36,7 +36,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "klog.h"
-#include "elf.h"
+#include "vbin.h"
 #include "../abi/syscall.h"
 #include "../fs/vfs.h"
 
@@ -217,17 +217,17 @@ struct process *process_create_kthread(const char *name, void (*entry)(void)) {
 }
 
 /*
- * Create a user process from an ELF32 image (see elf.c).
+ * Create a user process from a VBIN image (see vbin.c).
  *
- *   image pages : PRESENT|USER, plus WRITABLE only for PF_W segments, so text
- *                 and rodata are genuinely read-only and CR0.WP makes even
- *                 the kernel honour that
+ *   image pages : PRESENT|USER, plus WRITABLE only for the data region, so
+ *                 text is genuinely read-only and CR0.WP makes even the
+ *                 kernel honour that
  *   stack       : PRESENT|USER|WRITABLE, USER_STACK_PAGES pages below
  *                 USER_STACK_TOP; the page below is left unmapped (guard)
- *   entry       : e_entry from the ELF header; argc rides in EAX at entry
+ *   entry       : from the VBIN header; argc rides in EAX at entry
  *                 (crt0.s passes it to user_main)
  *
- * `image` is the raw file: an embedded blob (Phase 1) or the bytes the ELF
+ * `image` is the raw file: an embedded blob (staging) or the bytes the VBIN
  * loader got from the VFS. The caller keeps ownership; nothing is retained.
  */
 /* Write bytes into the (already mapped, writable) user stack of address
@@ -282,7 +282,7 @@ static bool build_user_stack(struct process *p, int argc, const char *const *arg
 
 struct process *process_create_user(const char *name, const void *image,
                                     size_t image_size, int argc, const char *const *argv) {
-    if (image_size < sizeof(struct elf32_ehdr)) return NULL;
+    if (image_size < sizeof(struct vbin_header)) return NULL;
 
     uint32_t fl = irq_save();
     struct process *p = alloc_slot();
@@ -295,10 +295,10 @@ struct process *process_create_user(const char *name, const void *image,
     uint32_t *pd = vmm_create_address_space();
     if (!pd) { p->state = PROC_UNUSED; return NULL; }
 
-    /* ELF32 image: one PT_LOAD per permission class, validated by elf.c */
+    /* VBIN image: flat text (RO) + data (RW) + zero BSS, validated by vbin.c */
     uint32_t entry = 0;
-    if (elf_load(pd, image, image_size, &entry) < 0) {
-        KWARN("PROC", "pid %d '%s': ELF rejected: %s", p->pid, name, elf_error());
+    if (vbin_load(pd, image, image_size, &entry) < 0) {
+        KWARN("PROC", "pid %d '%s': VBIN rejected: %s", p->pid, name, vbin_error());
         goto fail;
     }
     /* stack: USER_STACK_PAGES writable pages below USER_STACK_TOP */

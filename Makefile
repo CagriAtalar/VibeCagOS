@@ -1,7 +1,7 @@
 .PHONY: all clean run run-window run-gdb debug image disk help run-smp test \
         test-ring3 test-syscall test-scheduler test-usercopy test-faults \
         test-stdio test-fs test-shell test-pipe test-proc test-exec test-all \
-        check-boundary
+        check-boundary kernel user tools
 
 # ============================================================
 # VibeCagOS Build System
@@ -39,7 +39,7 @@ endif
 INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o process.o elf.o exec.o syscall.o sysfile.o pipe.o \
+OBJS := boot.o interrupts.o process.o vbin.o exec.o syscall.o sysfile.o pipe.o \
         progs.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         vibefs.o vfs.o procfs.o devfs.o \
@@ -82,14 +82,14 @@ interrupts.o: $(KERNEL_DIR)/interrupts.s
 
 # ---- kernel pieces split out of kernel.c ----
 process.o: $(KERNEL_DIR)/process.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h \
-           $(KERNEL_DIR)/elf.h src/abi/syscall.h
+           $(KERNEL_DIR)/vbin.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-elf.o: $(KERNEL_DIR)/elf.c $(KERNEL_DIR)/elf.h $(KERNEL_DIR)/vmm.h \
-       $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/kernel.h src/abi/syscall.h
+vbin.o: $(KERNEL_DIR)/vbin.c $(KERNEL_DIR)/vbin.h $(KERNEL_DIR)/vmm.h \
+        $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/kernel.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-exec.o: $(KERNEL_DIR)/exec.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/elf.h \
+exec.o: $(KERNEL_DIR)/exec.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vbin.h \
         $(KERNEL_DIR)/sysfile.h $(KERNEL_DIR)/vmm.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -131,20 +131,28 @@ user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h
 user_%.o: src/user/%.c src/user/ulib.h src/abi/syscall.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-# User programs are real ELF32 images (src/user/user.ld gives one PT_LOAD per
-# permission class); the kernel ELF loader in src/kernel/elf.c maps them.
+# User programs link as ELF32 (build intermediate), then tools/vbinpack
+# converts them to VBIN — the only format the kernel loads (docs/VBIN.md).
 %.elf: user_%.o $(USER_LIB_OBJS) src/user/user.ld
 	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,--build-id=none \
 		-Wl,-Map=$*.map -o $@ $(USER_LIB_OBJS) user_$*.o
 
-# Phase 1 of the plan: embed the user ELF images in the kernel image. The same
-# loader path serves filesystem-backed programs, so this is only a staging area.
-userblob.o: $(KERNEL_DIR)/userblob.s $(addsuffix .elf,$(USER_PROGS))
+# Host packer: runs on the build machine, so plain cc, no -m32.
+HOSTCC ?= cc
+tools/vbinpack: tools/vbinpack.c
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -o $@ $<
+
+%.vbin: %.elf tools/vbinpack
+	./tools/vbinpack $< $@
+
+# Staging only: embed the user VBIN images in the kernel image. The same
+# loader path serves filesystem-backed programs.
+userblob.o: $(KERNEL_DIR)/userblob.s $(addsuffix .vbin,$(USER_PROGS))
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-# Never let make treat the intermediate user ELFs as deletable: userblob.s
+# Never let make treat the intermediate user images as deletable: userblob.s
 # `.incbin`s them and the linker needs them to exist.
-.SECONDARY: $(addsuffix .elf,$(USER_PROGS))
+.SECONDARY: $(addsuffix .elf,$(USER_PROGS)) $(addsuffix .vbin,$(USER_PROGS))
 
 # Kernel C files
 kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
@@ -232,6 +240,12 @@ udp.o: $(NET_DIR)/udp.c $(NET_DIR)/udp.h $(NET_DIR)/ipv4.h $(KERNEL_DIR)/common.
 
 dns.o: $(NET_DIR)/dns.c $(NET_DIR)/dns.h $(NET_DIR)/udp.h $(KERNEL_DIR)/common.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# Explicit build stages: kernel / user programs / host tools / images.
+kernel: kernel.elf
+user: $(addsuffix .vbin,$(USER_PROGS))
+tools: tools/vbinpack
+image: os.iso disk.img
 
 # Link kernel ELF
 kernel.elf: $(OBJS) $(KERNEL_DIR)/kernel.ld
