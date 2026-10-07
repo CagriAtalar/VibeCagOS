@@ -1887,7 +1887,7 @@ static void kshell_main(void) {
  * the first user process. That is /sbin/init from the filesystem — a Ring-3
  * program that starts the shell and waits for it. The embedded copy is only
  * a fallback so a blank disk still boots. When init exits there is nothing
- * left to run, so the machine powers off. elma
+ * left to run, so the machine powers off.
  */
 static void kinit_main(void) {
     const char *av[1] = { "init" };
