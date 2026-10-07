@@ -2,12 +2,14 @@
 *.o
 *.elf
 *.bin
+*.vbin
 *.map
 *.pdf
 os.iso
 disk.img
 disk.vdi
 isodir/
+tools/vbinpack
 
 # Editor files
 *.swp
