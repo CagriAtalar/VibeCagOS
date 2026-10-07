@@ -211,8 +211,8 @@ symbols are linked into a user image, and ring 3 cannot call them anyway.
 | 1 | `exec` abandons the kernel C frames below ESP; the memory is not reclaimed until the process dies | low |
 | 2 | `exec_image` is a 512 KiB static buffer, so a second exec cannot overlap the first | low, by design |
 | 3 | User programs are still linked into the kernel image and copied to `/bin` at boot | medium (documented staging) |
-| 4 | All shell commands are builtins; `ls`, `cat`, … are not separate user programs | medium |
-| 5 | No fd inheritance, so `spawn` cannot redirect a child and the shell has no `|` pipelines | medium |
+| 4 | `mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`, `head`, `hexdump` are still shell builtins, not `/bin` programs | low |
+| 5 | A builtin cannot sit in a pipeline: `ls` is a program so `ls \| cat` works, `ps` is a builtin so it cannot | low |
 | 6 | `PF_X` is parsed but not enforced: 32-bit paging without PAE has no NX bit | low, inherent |
 | 7 | `vibefs_alloc_block()` rebuilds a `VIBEFS_DATA_SECTORS`-entry bitmap per block: O(inodes × blocks) per allocation | low |
 | 8 | No permission enforcement in VibeFS: `mode` is stored but never checked | medium |
@@ -220,12 +220,23 @@ symbols are linked into a user image, and ring 3 cannot call them anyway.
 | 10 | `struct process` embeds a 32 KiB stack, so 16 processes cost 512 KiB of BSS | low |
 | 11 | Maximum file size is 60 KiB (120 direct blocks, no indirection) | low |
 | 12 | Kernel page faults are fatal even when a user process caused them indirectly | low |
-| 13 | No `dup2`, no signal handling; `kill` is immediate | low |
+| 13 | No `dup2` (fd inheritance is done at spawn time instead) and no signal handling; `kill` is immediate | low |
 | 14 | The GUI (`src/drivers/gui.c`) still runs in ring 0 | see roadmap |
+| 15 | `/bin` is written at boot from the embedded copies, so a program deleted from the disk comes back | low |
 
-## 14. Migration status
+## 14. IPC
 
-Milestones 0–14 of the plan in the task are done and covered by tests; see
+`pipe()` is the first IPC primitive: a kernel-owned ring buffer reference
+counted by its open ends, blocking on the process wait channel with the pipe
+address as the channel. `SYS_SPAWNFDS(name, argv, in, out, err)` lets the shell
+hand a child its own pipe ends, which is how `cmd1 | cmd2` and `cmd > file`
+work for programs. *(verified: `test-pipe` — bytes crossing a pipe between two
+Ring-3 processes, EOF when the writer exits, `ls /bin | cat`)*
+
+## 15. Migration status
+
+Milestones 0–14 of the plan are done and covered by tests; see
 `docs/ROADMAP.md` for what is left. The two structural items that were still
-open when this audit was written — the ELF loader and `exec` — landed in the
-commit "exec: ELF32 loader, filesystem-backed programs and SYS_EXEC".
+open when this audit was first written — the ELF loader and `exec` — landed in
+the commit "exec: ELF32 loader, filesystem-backed programs and SYS_EXEC", and
+fd inheritance plus the first non-shell utilities followed.

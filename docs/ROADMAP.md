@@ -25,39 +25,45 @@
 | 11 | spawn / wait / exec | done | `test-proc`, `test-exec` |
 | 12 | ELF32 loader + filesystem programs | done | `test-exec` |
 | 13 | Pipes (IPC primitive) | done | `test-pipe` |
-| 14 | Userspace utilities | **next** | — |
-| 15 | GUI foundation (framebuffer, input, IPC) | not started | — |
+| 14 | Userspace utilities | done | `ls`, `cat`, `echo` are /bin programs |
+| 15 | GUI foundation (framebuffer, input, IPC) | **next** | — |
 | 16 | Compositor / window manager / apps | not started | — |
 
-## Next: milestone 14 — utilities as real user programs
+## Next: milestone 15 — GUI foundation
 
-The shell currently implements `ls`, `cat`, `echo`, `mkdir`, `stat`, `ps`, … as
-builtins. Each should become an ELF program in `/bin`, loaded by the same ELF
-loader, with `sh` only handling dispatch, redirection and `exec`.
+Not the GUI itself, and deliberately not before Ring 3, syscalls, the scheduler
+and the shell are all correct (they are). The foundation is three kernel
+primitives and one user-space program:
 
-Why, and what it proves: it removes the last sizable chunk of shell logic from
-Ring 3 builtins, exercises the VFS + ELF path for every command, and makes the
-"no kernel header in user code" boundary hold for real programs rather than for
-one hand-written shell.
+1. **Framebuffer abstraction.** A mode-set path (VESA/BIOS `0x4F15` or a
+   simpler `0xB800`-style text framebuffer first) plus
+   `struct framebuffer { address, width, height, pitch, bpp }`. MMIO must be
+   mapped through `vmm_map_mmio()` into supervisor-only pages — never into
+   every process. Today `vmm_map_mmio()` already does the right thing; nothing
+   calls it except MMIO setup.
+2. **Input event queue.** IRQ1 (keyboard) and IRQ12 (mouse) already exist in
+   the kernel and push bytes into a ring buffer. The GUI needs structured
+   events (key with modifiers, mouse with coordinates and buttons), produced in
+   the kernel and consumed by one user-space reader — not by each application.
+   `pipe()` already provides the transport; a shared ring buffer in mapped
+   memory is the cheaper option for high-rate mouse motion.
+3. **A way for user space to see the framebuffer.** Either a single-purpose
+   syscall that maps one framebuffer region into the calling process's address
+   space, or a fixed, kernel-created shared mapping. Whichever it is, it must
+   be a deliberate, audited mapping: not "identity map everything as user".
+4. **A user-space display server** that owns the framebuffer, reads the input
+   queue and draws. Compositor, window manager and applications run inside it.
 
-Blocks it needs first:
-
-- **fd inheritance in `spawn`** — a child needs to be able to run with a
-  redirected stdout (`ls > out.txt`) or a pipe. Today `spawn` always gives the
-  child a fresh console for fds 0/1/2, which is also why the shell cannot do
-  `ls | grep`. This is the natural next kernel change: pass a small fd map to
-  `spawn`, and let `sh` build the map for `>` and `|`.
-- **build system**: the Makefile's `USER_PROGS` list already drives
-  `userblob.s`, so adding utilities is a list edit, but they should also stop
-  being embedded once `/bin` is populated (defect 3 in the audit).
+The kernel must keep only the primitives. `src/drivers/gui.c` (a ring-0 demo
+desktop) is legacy and should be deleted once the user-space server works.
 
 ## After that
 
-- **GUI foundation (milestone 15)**: framebuffer abstraction
-  (`struct framebuffer { address, width, height, pitch, bpp }`), an input event
-  queue fed by the existing IRQ1/IRQ12 drivers, and shared memory so a
-  *user-space* display server can own the framebuffer. The kernel exposes
-  primitives only; no GUI toolkit in ring 0.
+- **More utilities as programs**: `mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`,
+  `head`, `hexdump` are still shell builtins; each is a `/bin` program now that
+  fd inheritance makes redirection work for them too.
+- **Stop embedding binaries in the kernel** (defect 3 in the audit): build a
+  populated `disk.img` so `/bin` is the only source of programs.
 - **Security hardening**: honour `mode` in VibeFS, `NX` once PAE is on, per-user
   `mmap`, guard pages below the user stack.
 - **SMP**: only after single-CPU scheduling is boring; the existing

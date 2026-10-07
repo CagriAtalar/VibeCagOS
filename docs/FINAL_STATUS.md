@@ -86,7 +86,9 @@
 | Shell uses only syscalls, includes no kernel header | done | |
 | ELF user programs in `/bin` | done | installed at boot from embedded images |
 | Pipes as the first IPC primitive | done | `test-pipe` |
-| fd inheritance / `dup2` / shell pipelines `\|` | not done | blocks milestone 14 |
+| fd inheritance at spawn (`SYS_SPAWNFDS`), shell pipelines `\|` | done | `ls /bin \| cat` |
+| Utilities as separate ELF programs (`ls`, `cat`, `echo`) | done | milestone 14 |
+| `mkdir`, `rm`, `cp`, `stat`, `ps`, `head`, `hexdump` still builtins | not done | low priority |
 | Programs still embedded in the kernel image | staging | see roadmap |
 
 ## Devices, networking, GUI
@@ -106,5 +108,5 @@
 `scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `pipe`, `proc`,
 `exec`. They assert privilege level, register state, preemption without yield,
 pointer validation, page-fault containment, fd semantics, filesystem round
-trips, zombie/orphan lifetime and ELF/exec behaviour — not just that the OS
-boots.
+trips, pipelines, zombie/orphan lifetime and ELF/exec behaviour — not just that
+the OS boots.

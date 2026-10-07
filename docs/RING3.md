@@ -72,8 +72,8 @@ programs: `src/user/utest.c`.
 * Syscalls: OPEN CLOSE READ WRITE LSEEK STAT FSTAT MKDIR UNLINK RMDIR READDIR
   (contracts in `src/abi/syscall.h`). Errors are `-errno` (VFS errors are
   translated in `sysfile.c`). Paths are copied with `strncpy_from_user`.
-* Known limits: no `dup2`/fd inheritance, so `spawn` always hands the child a
-  fresh console and the shell has no `|`; `O_RDONLY` write -> `-EBADF` (POSIX).
+* Known limits: no `dup2` — inheritance is done by `SYS_SPAWNFDS` at spawn time
+  instead; `O_RDONLY` write -> `-EBADF` (POSIX).
 
 ## Two bugs found while stress-testing (both pre-existing, now fixed)
 
@@ -111,8 +111,28 @@ EXEC (contracts in `src/abi/syscall.h`).
 
 **Shell (`src/user/sh.c`)** includes no kernel header. Builtins use syscalls only;
 system information comes from procfs. Non-builtins are spawned and waited for;
-`&` runs them in the background and `wait` reaps them. `>` / `>>` work for
-builtins.
+`&` runs them in the background and `wait` reaps them. `>` / `>>` and `|` work
+for programs as well as builtins.
+
+## fd inheritance and pipelines (M13)
+
+`SYS_SPAWN` always gave the child a fresh console, so nothing could be
+redirected. `SYS_SPAWNFDS(name, argv, in, out, err)` takes the child's fds 0/1/2
+from the caller's descriptors (`-1` closes that fd) and closes everything else
+in the child's table — the toy-OS stand-in for `fork()` + `dup2()`. Pipe ends
+are reference counted per end, so a child's close cannot free a pipe the parent
+is still holding.
+
+The shell uses it for `cmd > file` and for `cmd1 | cmd2 | cmd3`: one pipe per
+stage, the shell dropping its own copies right after each spawn, otherwise the
+reader would never see EOF.
+
+## Programs as separate files (M14)
+
+`ls`, `cat` and `echo` are no longer shell builtins: they are ELF programs in
+`/bin` (`src/user/{ls,cat,echo}.c`), loaded by the same ELF loader and spawned
+like anything else. `cat` with no arguments reads fd 0, so `utest 25 | cat` is a
+genuine two-process pipeline.
 
 ## ELF32 programs and exec (M12)
 
@@ -153,4 +173,5 @@ programs exist as ordinary files on a plain `disk.img`.
 * `exec` reuses a single 512 KiB static image buffer, so two execs cannot overlap.
 * `PF_X` is not enforced (no NX bit in 32-bit paging).
 * Programs are still embedded in the kernel image and copied to `/bin` at boot;
-  they are not built into the disk image.
+  they are not built into the disk image, so deleting one from `/bin` brings it
+  back on the next boot.
