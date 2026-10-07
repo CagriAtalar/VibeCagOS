@@ -1,9 +1,11 @@
 # VibeCagOS — Roadmap
 
 > **Status:** Ring-3 migration milestones 0–14 complete, plus a real Ring-3
-> `/sbin/init` with filesystem-first program loading. Next up: the GUI
-> foundation (milestone 15). See `docs/ARCHITECTURE_AUDIT.md` for the state of
-> the code and `docs/RING3.md` for the CPU-level flows.
+> `/sbin/init`, filesystem-first program loading, and the utility migration
+> (every command but `cd`/`exit`/`exec`/`wait`/`help` is a `/bin` program).
+> Next up: the GUI foundation (milestone 15). See
+> `docs/ARCHITECTURE_AUDIT.md` for the state of the code, `docs/USERSPACE.md`
+> for the userland layout, and `docs/RING3.md` for the CPU-level flows.
 
 ---
 
@@ -25,8 +27,9 @@
 | 11 | spawn / wait / exec | done | `test-proc`, `test-exec` |
 | 12 | VBIN loader + filesystem programs (consolidated from ELF32) | done | `test-exec` |
 | 13 | Pipes (IPC primitive) | done | `test-pipe` |
-| 14 | Userspace utilities | done | `ls`, `cat`, `echo` are /bin programs |
+| 14 | First userspace utilities (`ls`, `cat`, `echo`) | done | `test-shell`, `test-pipe` |
 | 14b | Ring-3 init + disk-first loading | done | `/sbin/init` spawns `/bin/sh`; bare names try `/bin` first |
+| 14c | All non-control commands moved to `/bin` | done | `test-shell` (`ps`, `pwd`, `mkdir`, … are programs) |
 | 15 | GUI foundation (framebuffer, input, IPC) | **next** | — |
 | 16 | Compositor / window manager / apps | not started | — |
 
@@ -60,9 +63,10 @@ desktop) is legacy and should be deleted once the user-space server works.
 
 ## After that
 
-- **More utilities as programs**: `mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`,
-  `head`, `hexdump` are still shell builtins; each is a `/bin` program now that
-  fd inheritance makes redirection work for them too.
+- **More utilities as programs**: done — `mkdir`, `rm`, `mv`, `cp`, `stat`,
+  `ps`, `head`, `hexdump`, `pwd`, `touch`, `write`, `clear`, `sleep`, `kill`,
+  `uname`, `uptime` are `/bin` programs; only `cd`, `exit`, `exec`, `wait`,
+  `help` remain builtins because they change shell state.
 - **Stop embedding binaries in the kernel** (defect 3 in the audit): build a
   populated `disk.img` so `/bin` is the only source of programs.
 - **Security hardening**: honour `mode` in VibeFS, `NX` once PAE is on, per-user

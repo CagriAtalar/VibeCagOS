@@ -88,8 +88,8 @@
 | Ring-3 init (`/sbin/init` spawns `/bin/sh`, propagates status) | done | boot is kinit → init → sh |
 | Pipes as the first IPC primitive | done | `test-pipe` |
 | fd inheritance at spawn (`SYS_SPAWNFDS`), shell pipelines `\|` | done | `ls /bin \| cat` |
-| Utilities as separate VBIN programs (`ls`, `cat`, `echo`) | done | milestone 14 |
-| `mkdir`, `rm`, `cp`, `stat`, `ps`, `head`, `hexdump` still builtins | not done | low priority |
+| Utilities as separate VBIN programs | done | `ls cat echo pwd head hexdump stat touch write mkdir rmdir rm mv cp clear sleep kill ps uname uptime` are all in `/bin` |
+| Shell-control builtins (`cd`, `exit`, `exec`, `wait`, `help`) | done | they must run in the shell's own process |
 | Programs still embedded in the kernel image | staging | see roadmap |
 
 ## Devices, networking, GUI

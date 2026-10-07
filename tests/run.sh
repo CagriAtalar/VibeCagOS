@@ -18,9 +18,12 @@ case $SUITE in
   scheduler) CMDS="utest 4 &@utest 5 &@wait@utest 4 &@utest 6@wait@ps" ;;
   usercopy)  CMDS="utest 7@ps" ;;
   stdio)     CMDS="utest 13@utest 14<abc@utest 16@utest 16@ps" ;;
-  shell)     CMDS="pwd@mkdir /a@cd /a@pwd@echo hi there > f.txt@cat f.txt@cp f.txt g.txt@ls@mv g.txt h.txt@stat h.txt@head h.txt@cd ..@rm /a/f.txt@rm /a/h.txt@rmdir /a@ls@uname@ps@cat /proc/meminfo@nosuch@kill 9999@ls /nonexistent@cd /nonexistent@write w.txt hello world@cat w.txt@echo more >> w.txt@cat w.txt@hexdump w.txt@rm w.txt@utest 19@pwd@date@devices" ;;
-  # Pids: 0 idle, 1 kinit (kernel), 2 init (Ring 3), 3 sh; first spawn is pid 4.
-  proc)      CMDS="free@utest 17 &@ps@kill 4@ps@wait@utest 18@utest 20@ps@kill 9@sleep 300@ps@free" ;;
+  shell)     CMDS="pwd@mkdir /a@cd /a@pwd@echo hi there > f.txt@cat f.txt@cp f.txt g.txt@ls@mv g.txt h.txt@stat h.txt@head h.txt@cd ..@rm /a/f.txt@rm /a/h.txt@rmdir /a@ls@uname@ps@cat /proc/meminfo@nosuch@kill 9999@ls /nonexistent@cd /nonexistent@write w.txt hello world@cat w.txt@echo more >> w.txt@cat w.txt@hexdump w.txt@rm w.txt@utest 19@pwd@ls /bin@echo piped | cat@date@devices" ;;
+  # Pids: 0 idle, 1 kinit (kernel), 2 init (Ring 3), 3 sh. ps/kill/sleep are
+  # ordinary /bin programs now, so they consume pids too; the sequence below is
+  # fixed, so the ids stay deterministic. utest 17 & = pid 4; ps = 5; kill = 6;
+  # ps = 7; utest 18 = 8 (children 9,10); utest 20 = 11, its orphaned sleeper = 12.
+  proc)      CMDS="free@utest 17 &@ps@kill 4@ps@wait@utest 18@utest 20@ps@kill 12@sleep 300@ps@free" ;;
   fs)        CMDS="utest 15@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
   pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
@@ -100,7 +103,11 @@ case $SUITE in
   expect 'Size: 9'                         'stat'
   reject '^d  a$'                          'rm + rmdir removed /a'
   expect 'VibeCagOS 0.5.0'                 'uname (procfs)'
-  expect 'RUNNING   sh'                    'ps shows the shell as a user process'
+  expect 'RUNNING   ps'                    'ps runs as its own process in /bin'
+  expect 'BLOCKED   sh'                    'ps sees the shell blocked in waitpid'
+  expect '^-  pwd$'                        'pwd is an installed /bin program'
+  expect '^-  mkdir$'                      'mkdir is an installed /bin program'
+  expect '^piped$'                         'echo | cat: two /bin programs in a pipeline'
   expect 'MemTotal|Total|Free'             'meminfo (procfs)'
   expect 'sh: nosuch: command not found'   'unknown command'
   expect 'kill: 9999: No such process'     'kill missing pid -> ESRCH'
@@ -132,7 +139,7 @@ case $SUITE in
   expect 'T18: wait_badptr=-14'            'waitpid bad pointer -> EFAULT'
   expect '\[pid [0-9]+\] exit code 7'      'parent exit code'
   expect 'T20: child_spawned=1'            'orphan scenario: parent exits first'
-  expect 'kill: terminated pid 9'          'orphaned child (ppid -1) can be killed'
+  expect 'kill: terminated pid 12'         'orphaned child (ppid -1) can be killed by a /bin program'
   nframes=$(grep -a '^FramesFree' "$LOG" | awk '{print $2}' | sort -u | wc -l)
   if [ "$nframes" = 1 ]; then echo "  PASS  no frame leak (FramesFree identical before/after)"; else echo "  FAIL  frame leak: $(grep -a '^FramesFree' "$LOG" | tr '\n' ' ')"; FAIL=1; fi
   reject 'PANIC|EXCEPTION'                 'no panic' ;;

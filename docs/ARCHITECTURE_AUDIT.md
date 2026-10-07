@@ -218,8 +218,8 @@ symbols are linked into a user image, and ring 3 cannot call them anyway.
 | 1 | `exec` abandons the kernel C frames below ESP; the memory is not reclaimed until the process dies | low |
 | 2 | `exec_image` is a 512 KiB static buffer, so a second exec cannot overlap the first | low, by design |
 | 3 | User programs are still linked into the kernel image (`userblob.s`) as a boot fallback, but the disk is authoritative: bare names try `/bin` first, kinit starts `/sbin/init` from the VFS | medium (documented staging) |
-| 4 | `mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`, `head`, `hexdump` are still shell builtins, not `/bin` programs | low |
-| 5 | A builtin cannot sit in a pipeline: `ls` is a program so `ls \| cat` works, `ps` is a builtin so it cannot | low |
+| 4 | ~~`mkdir`, `rm`, `mv`, `cp`, `stat`, `ps`, `head`, `hexdump` are still shell builtins~~ resolved: every command except the five shell-control builtins is a `/bin` program | — |
+| 5 | ~~a builtin cannot sit in a pipeline~~ resolved: `ls /bin \| head` and `echo x \| cat` are two-program pipelines | — |
 | 6 | `PF_X` is parsed but not enforced: 32-bit paging without PAE has no NX bit | low, inherent |
 | 7 | `vibefs_alloc_block()` rebuilds a `VIBEFS_DATA_SECTORS`-entry bitmap per block: O(inodes × blocks) per allocation | low |
 | 8 | No permission enforcement in VibeFS: `mode` is stored but never checked | medium |
@@ -242,9 +242,10 @@ Ring-3 processes, EOF when the writer exits, `ls /bin | cat`)*
 
 ## 15. Migration status
 
-Milestones 0–14 of the plan are done and covered by tests; see
-`docs/ROADMAP.md` for what is left. The two structural items that were still
-open when this audit was first written — the executable loader and `exec` —
-landed as an ELF loader first ("exec: ELF32 loader...") and was then
-consolidated into the native VBIN format ("vbin: ..."), with fd inheritance
-and the first non-shell utilities in between.
+Milestones 0–14 of the plan are done and covered by tests, plus the utility
+migration: every non-shell-control command is now a `/bin` program (see
+`docs/USERSPACE.md`). See `docs/ROADMAP.md` for what is left. The two
+structural items that were still open when this audit was first written — the
+executable loader and `exec` — landed as an ELF loader first ("exec: ELF32
+loader...") and was then consolidated into the native VBIN format ("vbin:
+..."), with fd inheritance and the first non-shell utilities in between.

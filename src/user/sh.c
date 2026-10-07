@@ -3,15 +3,25 @@
  *
  * Runs as an ordinary process: every action is a system call (see
  * src/abi/syscall.h). It includes no kernel header and cannot reach any
- * kernel function. System information commands read procfs files through
- * open()/read(); anything that is not a builtin is spawned as a separate
- * program and waited for (or left running with a trailing &).
+ * kernel function.
  *
- * Redirection (`>`, `>>`) and pipelines (`|`) work for programs as well as for
- * builtins, because SYS_SPAWNFDS can hand a child the caller's descriptors.
+ * Almost every command is a separate Ring-3 program in /bin: ls, cat, echo,
+ * pwd, head, hexdump, stat, mkdir, rmdir, rm, mv, cp, touch, write, clear,
+ * sleep, kill, ps, uname, uptime. The shell only keeps the operations that
+ * MUST run in the shell's own process, because they change shell state:
  *
- * ls, cat and echo are NOT builtins: they are separate VBIN programs in /bin,
- * which is why `utest 25 | cat` is a real two-process pipeline.
+ *   cd     changes this process's cwd
+ *   exit   terminates this process
+ *   exec   replaces this process image
+ *   wait   reaps this shell's background children
+ *   help   pure shell text
+ *
+ * plus a few read-only procfs convenience aliases (free, date, ...) that are
+ * equivalent to `cat /proc/<x>`.
+ *
+ * Redirection (`>`, `>>`) and pipelines (`|`) work for programs, because
+ * SYS_SPAWNFDS can hand a child the caller's descriptors; a pipeline stage is
+ * therefore always a program, e.g. `ls /bin | head`.
  */
 #include "ulib.h"
 
@@ -43,133 +53,11 @@ static int cat_path(const char *cmd, const char *path) {
     return 0;
 }
 
-/* ---- builtins ----------------------------------------------------------- */
-/* ls, cat and echo live in /bin as separate programs (src/user/{ls,cat,echo}.c).
- * Keeping them here would have meant the shell, not the kernel, owned them. */
+/* ---- builtins: only what must run in the shell's own process ------------- */
 
-static int cmd_touch(int argc, char **argv) {
-    int rc = 0;
-    for (int i = 1; i < argc; i++) {
-        int fd = sys_open(argv[i], O_CREAT | O_WRONLY, 0644);
-        if (fd < 0) rc |= fail("touch", argv[i], fd); else sys_close(fd);
-    }
-    return rc;
-}
-
-static int cmd_write(int argc, char **argv) {
-    if (argc < 3) { uputs(2, "usage: write <file> <text...>\n"); return 1; }
-    int fd = sys_open(argv[1], O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) return fail("write", argv[1], fd);
-    for (int i = 2; i < argc; i++) {
-        sys_write(fd, argv[i], strlen(argv[i]));
-        sys_write(fd, i + 1 < argc ? " " : "\n", 1);
-    }
-    sys_close(fd);
-    return 0;
-}
-
-static int cmd_cp(int argc, char **argv) {
-    if (argc != 3) { uputs(2, "usage: cp <src> <dst>\n"); return 1; }
-    int in = sys_open(argv[1], O_RDONLY, 0);
-    if (in < 0) return fail("cp", argv[1], in);
-    int o = sys_open(argv[2], O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (o < 0) { sys_close(in); return fail("cp", argv[2], o); }
-    int r = copy_fd(in, o);
-    sys_close(in); sys_close(o);
-    return r < 0 ? fail("cp", argv[1], r) : 0;
-}
-
-static int cmd_mv(int argc, char **argv) {
-    if (argc != 3) { uputs(2, "usage: mv <old> <new>\n"); return 1; }
-    int r = sys_rename(argv[1], argv[2]);
-    return r < 0 ? fail("mv", argv[1], r) : 0;
-}
-
-static int cmd_rm(int argc, char **argv) {
-    int rc = 0;
-    for (int i = 1; i < argc; i++) { int r = sys_unlink(argv[i]); if (r < 0) rc |= fail("rm", argv[i], r); }
-    return argc < 2 ? (uputs(2, "usage: rm <file...>\n"), 1) : rc;
-}
-static int cmd_rmdir(int argc, char **argv) {
-    int rc = 0;
-    for (int i = 1; i < argc; i++) { int r = sys_rmdir(argv[i]); if (r < 0) rc |= fail("rmdir", argv[i], r); }
-    return argc < 2 ? (uputs(2, "usage: rmdir <dir...>\n"), 1) : rc;
-}
-static int cmd_mkdir(int argc, char **argv) {
-    int rc = 0;
-    for (int i = 1; i < argc; i++) { int r = sys_mkdir(argv[i], 0755); if (r < 0) rc |= fail("mkdir", argv[i], r); }
-    return argc < 2 ? (uputs(2, "usage: mkdir <dir...>\n"), 1) : rc;
-}
 static int cmd_cd(int argc, char **argv) {
     int r = sys_chdir(argc > 1 ? argv[1] : "/");
     return r < 0 ? fail("cd", argc > 1 ? argv[1] : "/", r) : 0;
-}
-static int cmd_pwd(int argc, char **argv) {
-    (void)argc; (void)argv;
-    char b[256]; int r = sys_getcwd(b, sizeof(b));
-    if (r < 0) return fail("pwd", 0, r);
-    out("%s\n", b);
-    return 0;
-}
-
-static int cmd_stat(int argc, char **argv) {
-    if (argc < 2) { uputs(2, "usage: stat <path>\n"); return 1; }
-    struct vibe_stat st;
-    int r = sys_stat(argv[1], &st);
-    if (r < 0) return fail("stat", argv[1], r);
-    out("  File: %s\n  Type: %s  Size: %u  Mode: %03o  Links: %u  Inode: %u\n", argv[1],
-        st.type == VIBE_TYPE_DIR ? "directory" : st.type == VIBE_TYPE_CHR ? "chardev" : "regular file",
-        st.size, st.mode, st.nlink, st.ino);
-    return 0;
-}
-
-static int cmd_head(int argc, char **argv) {
-    int lines = 10, i = 1;
-    if (argc > 2 && !strcmp(argv[1], "-n")) { lines = atoi(argv[2]); i = 3; }
-    if (i >= argc) { uputs(2, "usage: head [-n N] <file>\n"); return 1; }
-    int fd = sys_open(argv[i], O_RDONLY, 0);
-    if (fd < 0) return fail("head", argv[i], fd);
-    char b[128]; int n, seen = 0;
-    while (seen < lines && (n = sys_read(fd, b, sizeof(b))) > 0) {
-        int k = 0;
-        for (; k < n && seen < lines; k++) if (b[k] == '\n') seen++;
-        sys_write(ofd, b, (u32)k);
-    }
-    sys_close(fd);
-    return 0;
-}
-
-static int cmd_hexdump(int argc, char **argv) {
-    if (argc < 2) { uputs(2, "usage: hexdump <file>\n"); return 1; }
-    int fd = sys_open(argv[1], O_RDONLY, 0);
-    if (fd < 0) return fail("hexdump", argv[1], fd);
-    unsigned char b[16]; int n; u32 off = 0;
-    while ((n = sys_read(fd, b, sizeof(b))) > 0) {
-        out("%08x  ", off);
-        for (int i = 0; i < 16; i++) { if (i < n) out("%02x ", b[i]); else out("   "); }
-        out(" |");
-        for (int i = 0; i < n; i++) out("%c", b[i] >= 32 && b[i] < 127 ? b[i] : '.');
-        out("|\n");
-        off += (u32)n;
-    }
-    sys_close(fd);
-    return 0;
-}
-
-/* procfs-backed information commands */
-static int cmd_proc(const char *name, const char *path) { return cat_path(name, path); }
-
-static int cmd_kill(int argc, char **argv) {
-    if (argc < 2) { uputs(2, "usage: kill <pid>\n"); return 1; }
-    int r = sys_kill(atoi(argv[1]));
-    if (r < 0) return fail("kill", argv[1], r);
-    out("kill: terminated pid %d\n", atoi(argv[1]));
-    return 0;
-}
-
-static int cmd_sleep(int argc, char **argv) {
-    sys_sleep(argc > 1 ? (u32)atoi(argv[1]) : 1000);
-    return 0;
 }
 
 static int cmd_wait(int argc, char **argv) {
@@ -181,17 +69,21 @@ static int cmd_wait(int argc, char **argv) {
 
 static int cmd_help(int argc, char **argv) {
     (void)argc; (void)argv;
-    out("VibeCagOS user shell (Ring 3). Builtins:\n"
-        "  cd [dir]  pwd  mkdir  rmdir  touch  rm  mv  cp  head [-n N]  write  stat\n"
-        "  hexdump  ps  kill <pid>  wait  sleep <ms>  clear  help  exit\n"
-        "  uptime  date  uname  free  mem  cpuinfo  devices  pci  dmesg  mounts  net\n"
-        "  exec <program> [args...]   replace this shell with another program\n"
+    out("VibeCagOS user shell (Ring 3).\n"
+        "Builtins (must run in the shell): cd, exit, exec, wait, help\n"
+        "  cd [dir]              change this shell's working directory\n"
+        "  exec <prog> [args...] replace this shell with another program\n"
+        "  wait                  reap background children\n"
+        "Procfs views (equivalent to `cat /proc/<x>`):\n"
+        "  free|mem  cpuinfo  dmesg  mounts  net  devices  pci  date\n"
+        "Programs in /bin (separate address spaces):\n"
+        "  ls cat echo pwd head hexdump stat touch write\n"
+        "  mkdir rmdir rm mv cp clear sleep kill ps uname uptime utest\n"
         "Syntax:\n"
-        "  cmd > file   cmd >> file   redirection (builtins and programs)\n"
-        "  cmd1 | cmd2  pipelines between programs, e.g. utest 25 | cat\n"
+        "  cmd > file   cmd >> file   redirection (programs and builtins)\n"
+        "  cmd1 | cmd2  pipeline between programs, e.g. ls /bin | head\n"
         "  cmd &        run in the background; 'wait' reaps them\n"
-        "Programs in /bin (separate images, own address space):\n"
-        "  ls [-l] [dir]   cat [file...]   echo [text]   utest <n>\n");
+        "  cmd < file   feed a program's stdin from a file\n");
     return 0;
 }
 
@@ -208,35 +100,19 @@ static int cmd_exec(int argc, char **argv) {
 static int run_builtin(int argc, char **argv, int *found) {
     const char *c = argv[0];
     *found = 1;
-    if (!strcmp(c, "touch"))   return cmd_touch(argc, argv);
-    if (!strcmp(c, "write"))   return cmd_write(argc, argv);
-    if (!strcmp(c, "cp"))      return cmd_cp(argc, argv);
-    if (!strcmp(c, "mv"))      return cmd_mv(argc, argv);
-    if (!strcmp(c, "rm"))      return cmd_rm(argc, argv);
-    if (!strcmp(c, "rmdir"))   return cmd_rmdir(argc, argv);
-    if (!strcmp(c, "mkdir"))   return cmd_mkdir(argc, argv);
     if (!strcmp(c, "cd"))      return cmd_cd(argc, argv);
-    if (!strcmp(c, "pwd"))     return cmd_pwd(argc, argv);
-    if (!strcmp(c, "stat"))    return cmd_stat(argc, argv);
-    if (!strcmp(c, "head"))    return cmd_head(argc, argv);
-    if (!strcmp(c, "hexdump")) return cmd_hexdump(argc, argv);
-    if (!strcmp(c, "kill"))    return cmd_kill(argc, argv);
-    if (!strcmp(c, "sleep"))   return cmd_sleep(argc, argv);
     if (!strcmp(c, "wait"))    return cmd_wait(argc, argv);
     if (!strcmp(c, "exec"))    return cmd_exec(argc, argv);
     if (!strcmp(c, "help"))    return cmd_help(argc, argv);
-    if (!strcmp(c, "clear"))   return sys_clear();
-    if (!strcmp(c, "ps"))      return cmd_proc(c, "/proc/tasks");
-    if (!strcmp(c, "uptime"))  return cmd_proc(c, "/proc/uptime");
-    if (!strcmp(c, "uname"))   return cmd_proc(c, "/proc/version");
-    if (!strcmp(c, "free") || !strcmp(c, "mem")) return cmd_proc(c, "/proc/meminfo");
-    if (!strcmp(c, "cpuinfo")) return cmd_proc(c, "/proc/cpuinfo");
-    if (!strcmp(c, "dmesg"))   return cmd_proc(c, "/proc/dmesg");
-    if (!strcmp(c, "mounts"))  return cmd_proc(c, "/proc/mounts");
-    if (!strcmp(c, "net"))     return cmd_proc(c, "/proc/net");
-    if (!strcmp(c, "devices")) return cmd_proc(c, "/proc/devices");
-    if (!strcmp(c, "pci"))     return cmd_proc(c, "/proc/pci");
-    if (!strcmp(c, "date"))    return cmd_proc(c, "/proc/date");
+    /* procfs convenience aliases: a one-word way to `cat /proc/<x>` */
+    if (!strcmp(c, "free") || !strcmp(c, "mem")) return cat_path(c, "/proc/meminfo");
+    if (!strcmp(c, "cpuinfo")) return cat_path(c, "/proc/cpuinfo");
+    if (!strcmp(c, "dmesg"))   return cat_path(c, "/proc/dmesg");
+    if (!strcmp(c, "mounts"))  return cat_path(c, "/proc/mounts");
+    if (!strcmp(c, "net"))     return cat_path(c, "/proc/net");
+    if (!strcmp(c, "devices")) return cat_path(c, "/proc/devices");
+    if (!strcmp(c, "pci"))     return cat_path(c, "/proc/pci");
+    if (!strcmp(c, "date"))    return cat_path(c, "/proc/date");
     *found = 0;
     return 0;
 }
@@ -368,23 +244,37 @@ static void execute(char *line) {
         if (!strcmp(argv[i], "|")) { run_pipeline(argv, argc); return; }
     }
 
-    /* redirection: cmd > file  |  cmd >> file   (last two words) */
-    const char *redir = 0; int append = 0;
-    if (argc >= 3 && (!strcmp(argv[argc - 2], ">") || !strcmp(argv[argc - 2], ">>"))) {
-        append = argv[argc - 2][1] == '>';
-        redir = argv[argc - 1];
-        argc -= 2;
+    /* redirection: pull `< file`, `> file` and `>> file` out of the words */
+    const char *infile = 0, *outfile = 0;
+    int append = 0, w = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "<") && i + 1 < argc) {
+            infile = argv[i + 1]; i++;
+        } else if ((!strcmp(argv[i], ">") || !strcmp(argv[i], ">>")) && i + 1 < argc) {
+            append = argv[i][1] == '>';
+            outfile = argv[i + 1]; i++;
+        } else {
+            argv[w++] = argv[i];
+        }
     }
+    argc = w;
+    argv[argc] = 0;
     if (argc == 0) return;
 
-    if (redir) {
-        int fd = sys_open(redir, O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC), 0644);
-        if (fd < 0) { fail("sh", redir, fd); return; }
-        run_one(argv, argc, 0, fd, 2, background);
-        sys_close(fd);
-        return;
+    int in = 0, outfd = 1;
+    if (infile) {
+        in = sys_open(infile, O_RDONLY, 0);
+        if (in < 0) { fail("sh", infile, in); return; }
     }
-    run_one(argv, argc, 0, 1, 2, background);
+    if (outfile) {
+        outfd = sys_open(outfile, O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC), 0644);
+        if (outfd < 0) { fail("sh", outfile, outfd); if (in > 0) sys_close(in); return; }
+    }
+
+    run_one(argv, argc, in, outfd, 2, background);
+
+    if (in > 0) sys_close(in);
+    if (outfd != 1) sys_close(outfd);
 }
 
 int user_main(int argc, char **argv) {

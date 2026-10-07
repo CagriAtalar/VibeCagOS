@@ -19,8 +19,25 @@ prog_\name\()_end:
 .endm
 
 EMBED sh
+EMBED init
+EMBED utest
 EMBED ls
 EMBED cat
 EMBED echo
-EMBED utest
-EMBED init
+EMBED pwd
+EMBED head
+EMBED hexdump
+EMBED stat
+EMBED mkdir
+EMBED rmdir
+EMBED rm
+EMBED mv
+EMBED cp
+EMBED touch
+EMBED write
+EMBED clear
+EMBED sleep
+EMBED kill
+EMBED ps
+EMBED uname
+EMBED uptime

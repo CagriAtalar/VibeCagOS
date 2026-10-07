@@ -32,8 +32,9 @@
 | ACPI poweroff | works | works (kinit path) | every suite ends with `exit` | — |
 | VBIN loader + spawn/exec | ELF32 runtime loader | VBIN only, FS-first + embedded fallback | `exec`, `proc` | 512 KiB image cap, 1 MiB span cap, no NX |
 | Pipes | none | blocking byte stream, EOF | `pipe` | no `O_NONBLOCK` |
-| Shell (Ring-3) | Ring-0 `run_shell` | `/bin/sh` + `/sbin/init`, syscalls only | `shell`, `pipe` | some builtins remain (see audit #4) |
-| `ls` / `cat` / `echo` | shell builtins | separate `/bin` VBINs | `pipe`, `exec` | — |
+| Shell (Ring-3) | Ring-0 `run_shell` | `/bin/sh` + `/sbin/init`, syscalls only | `shell`, `pipe` | only `cd`/`exit`/`exec`/`wait`/`help` are builtins |
+| Utilities | shell builtins | 20 separate `/bin` VBINs | `shell`, `pipe`, `exec` | `ping` still needs a network syscall |
+| `pwd` / `ps` / `uname` / `uptime` | shell builtins / procfs aliases | `/bin` programs reading procfs or SYS_* | `shell` | — |
 | GUI desktop | kernel Mode-13h demo | unchanged demo | none automated | still Ring 0 (milestone 15) |
 
 ## How to read a failure
@@ -42,5 +43,7 @@
 2. Find the first `FAIL` line — later failures in the same suite are usually
    fallout (e.g. a hung `wait` starves every later prompt).
 3. Pid-sensitive expects (`proc` suite) assume the layout `0 idle, 1 kinit,
-   2 init, 3 sh`; if boot gains a process, update the pids deliberately, not
-   by weakening the patterns.
+   2 init, 3 sh` and then a fixed creation order. Utilities such as `ps`,
+   `kill` and `sleep` are ordinary processes now, so they consume pids too; the
+   `proc` suite documents the exact map. If boot or the command sequence
+   changes, update the pids deliberately, not by weakening the patterns.

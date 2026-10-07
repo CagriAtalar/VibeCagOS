@@ -25,7 +25,7 @@ VibeCagOS is a real operating system kernel that:
 - Supports **PS/2 keyboard** and serial console simultaneously
 - Has **paging enabled** with a kernel identity map
 - Supports an **RTL8139 NIC** with ARP, IPv4, and ICMP ping
-- Shows a **rich colored interactive shell** with directory navigation, CWD prompt, and command history
+- Runs a **Ring-3 user shell** whose commands are ordinary `/bin` programs
 
 This is not a toy. Every subsystem that claims to work has been built, booted, tested, and verified in QEMU.
 
@@ -107,52 +107,32 @@ Constants live in `src/kernel/kernel.h` (`USER_BASE`, `USER_STACK_TOP`,
 
 ```
 utest <n>       run a Ring-3 self test (& = background)
-ps              list processes with their kernel state
 ```
 
 `make test-all` runs the deterministic QEMU suites: `ring3`, `syscall`,
-`scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `proc`.
+`scheduler`, `usercopy`, `faults`, `stdio`, `fs`, `shell`, `pipe`, `proc`,
+`exec`.
 
 ---
 
-## Shell Commands
+## Shell and userland
 
-Once booted, you'll see the colored prompt `vcos:<cwd>$` (e.g. `vcos:/$ ` or `vcos:/home/user$ `). Available commands:
+The shell (`/bin/sh`) is an **ordinary Ring-3 process** started by `/sbin/init`.
+Almost every command is a separate `/bin` program in its own address space,
+reached only through `int 0x80`; `ls /bin | head` and `echo x | cat` are
+pipelines between real processes. The shell keeps only the builtins that must
+run in its own process (`cd`, `exit`, `exec`, `wait`, `help`). See
+`docs/USERSPACE.md` for the full program list.
 
-| Command | Category | Description |
-|---|---|---|
-| `help` | General | Show all commands |
-| `pwd` | Filesystem | Print current working directory |
-| `cd <path>` | Filesystem | Change current working directory |
-| `ls [path]` | Filesystem | List directory contents |
-| `ls -l [path]` | Filesystem | Detailed file listing with sizes and types |
-| `mkdir <path>` | Filesystem | Create a directory |
-| `mkdir -p <path>` | Filesystem | Create directory tree recursively |
-| `touch <file>` | Filesystem | Create empty file |
-| `cat <file>` | Filesystem | Display file contents |
-| `write <file>` | Filesystem | Write content to file interactively |
-| `rm <file>` | Filesystem | Delete regular file |
-| `rmdir <dir>` | Filesystem | Remove empty directory |
-| `mv <src> <dst>` | Filesystem | Rename or move file / directory |
-| `stat <path>` | Filesystem | Inspect file metadata (inode, size, mode, links) |
-| `mounts` | System | Display active VFS mount table |
-| `fsinfo` | System | Display VibeFS superblock and block allocation info |
-| `heap` | System | Display kernel dynamic heap allocator stats |
-| `mem` | System | Physical memory and heap statistics |
-| `ps` | System | List running processes |
-| `uname` | System | OS name, version, architecture, and subsystem info |
-| `uptime` | System | System uptime (ticks and milliseconds) |
-| `ping <ip>` | Network | Ping an IP via ICMP (RTL8139 NIC) |
-| `format` | Admin | Reformat root VibeFS filesystem |
-| `clear` | UI | Clear VGA screen |
-| `hello` | General | Print greeting |
-| `exit` | System | Sync filesystems and halt / ACPI power off |
+| Category | Commands |
+|---|---|
+| Filesystem (programs) | `ls` `cat` `pwd` `mkdir` `rmdir` `rm` `mv` `cp` `touch` `stat` `head` `hexdump` `write` |
+| Process (programs) | `ps` `kill` `sleep` `utest` |
+| System (programs / procfs) | `uname` `uptime` `clear` `free` `date` `devices` `cpuinfo` `dmesg` `mounts` `net` `pci` |
+| Shell builtins | `cd` `exit` `exec` `wait` `help` |
 
-**Shell features:**
-- Up/down arrow keys for command history (last 16 commands)
-- Backspace and in-line editing
-- Colored prompt with active working directory
-- Error messages in distinct colored text
+**Shell syntax:** `cmd arg...`, `cmd &` (background), `cmd1 | cmd2` (pipeline),
+`cmd > file`, `cmd >> file`, `cmd < file`.
 
 ---
 
@@ -161,16 +141,19 @@ Once booted, you'll see the colored prompt `vcos:<cwd>$` (e.g. `vcos:/$ ` or `vc
 ```
 +--------------------------------------------------+
 |              USER SPACE (Ring 3)                 |
-|  Future userspace applications                   |
+|  /sbin/init -> /bin/sh                           |
+|  ls cat echo pwd mkdir rm mv cp stat ps ...      |
+|  ps reads /proc/tasks, DOOM someday              |
 +--------------------------------------------------+
 |              SYSCALL BOUNDARY (int 0x80)         |
 +--------------------------------------------------+
 |              KERNEL (Ring 0)                     |
 |                                                  |
-|  Interactive Shell (CWD, history, colored prompt)|
-|  VFS (Mount table, vnodes, file descriptor table)|
+|  Syscall dispatcher (validation, errno)          |
+|  VFS (Mount table, vnodes, per-process fd table) |
 |     ├── VibeFS (Hierarchical disk filesystem)    |
-|     └── procfs (Dynamic /proc introspection)     |
+|     ├── procfs (Dynamic /proc introspection)     |
+|     └── devfs  (/dev/null,zero,console,...)      |
 |                                                  |
 |  Preemptive Scheduler     Dynamic Heap (kmalloc) |
 |  Paging (Identity map)    Physical Allocator     |

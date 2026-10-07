@@ -119,10 +119,13 @@ user_crt0.o: src/user/crt0.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 # Every user program = crt0 + its own .c + the tiny user library (ulib.c).
-# sh is the shell; ls/cat/echo are ordinary utilities that the shell spawns
-# instead of implementing them as builtins (milestone 14); init is the first
-# user process and starts the shell (PID 1's child, Ring 3).
-USER_PROGS := sh ls cat echo utest init
+# sh is the shell; init is the first user process. Everything in the utilities
+# line is an ordinary Ring 3 program the shell spawns by name (milestone 14/15):
+# `ls | head` is two /bin programs in a pipeline, not shell builtins.
+USER_PROGS := sh init utest \
+              ls cat echo pwd head hexdump stat \
+              mkdir rmdir rm mv cp touch write \
+              clear sleep kill ps uname uptime
 USER_LIB_OBJS := user_crt0.o user_ulib.o
 
 user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h

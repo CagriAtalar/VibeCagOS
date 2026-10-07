@@ -117,10 +117,14 @@ EXEC (contracts in `src/abi/syscall.h`).
 * cwd is per process; `sysfile.c` makes every path absolute and normalises
   `.`/`..` before it reaches the VFS, so the VFS's own global cwd is not used.
 
-**Shell (`src/user/sh.c`)** includes no kernel header. Builtins use syscalls only;
-system information comes from procfs. Non-builtins are spawned and waited for;
-`&` runs them in the background and `wait` reaps them. `>` / `>>` and `|` work
-for programs as well as builtins.
+**Shell (`src/user/sh.c`)** includes no kernel header. Its only builtins are the
+operations that must run in the shell's own process — `cd`, `exit`, `exec`,
+`wait`, `help` — plus a few read-only procfs aliases (`free`, `date`, …).
+Everything else is a `/bin` program that the shell spawns: `ls cat echo pwd
+head hexdump stat touch write mkdir rmdir rm mv cp clear sleep kill ps uname
+uptime`. `&` runs a program in the background and `wait` reaps it. `<`, `>`,
+`>>` and `|` are handled by the shell for programs (it opens the file or pipe
+and hands the fd to `SYS_SPAWNFDS`).
 
 ## fd inheritance and pipelines (M13)
 
@@ -137,10 +141,15 @@ reader would never see EOF.
 
 ## Programs as separate files (M14)
 
-`ls`, `cat` and `echo` are no longer shell builtins: they are VBIN programs in
-`/bin` (`src/user/{ls,cat,echo}.c`), loaded by the same VBIN loader and spawned
-like anything else. `cat` with no arguments reads fd 0, so `utest 25 | cat` is a
-genuine two-process pipeline.
+`ls`, `cat` and `echo` were the first commands moved out of the shell into VBIN
+programs in `/bin` (`src/user/{ls,cat,echo}.c`), loaded by the same VBIN loader
+and spawned like anything else. The utility migration then moved every other
+command as well: `pwd head hexdump stat touch write mkdir rmdir rm mv cp clear
+sleep kill ps uname uptime` are all `/bin` programs now. `cat` with no argument
+reads fd 0 and `head` with no file reads fd 0, so `utest 25 | cat` and
+`ls /bin | head` are genuine two-process pipelines. `ps` reads `/proc/tasks`
+through `open()`/`read()`, so process inspection exercises procfs and the
+syscall boundary rather than a kernel command. See `docs/USERSPACE.md`.
 
 ## VBIN programs and exec (M12, consolidated)
 
