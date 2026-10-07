@@ -1,11 +1,13 @@
-/* User program entry. The kernel delivers the start argument in EAX. */
-/* The VBIN header is emitted by user.ld at the start of the image. */
-
+/* User program entry. Kernel leaves ESP -> argc, followed by argv[]. */
 .section .text
 .global _start
 _start:
-    pushl %eax                 /* arg -> user_main(int arg) */
-    call  user_main
+    movl  (%esp), %eax         /* argc */
+    leal  4(%esp), %ebx        /* argv */
+    xorl  %ebp, %ebp
+    pushl %ebx
+    pushl %eax
+    call  user_main            /* int user_main(int argc, char **argv) */
     movl  %eax, %ebx           /* exit status */
     movl  $1, %eax             /* SYS_EXIT */
     int   $0x80

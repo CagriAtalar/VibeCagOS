@@ -158,6 +158,8 @@ struct trap_frame {
  * Process Structure
  * ========================================================================= */
 
+#define PROC_CWD_MAX 256
+
 /* Per-process file descriptor table entry. */
 #define OPEN_MAX 16
 #define FD_NONE    0
@@ -185,6 +187,7 @@ struct process {
     void   (*kentry)(void);        /* entry point (kernel threads) */
     char     name[32];
     struct fdent fds[OPEN_MAX];    /* fd 0/1/2 = console */
+    char     cwd[PROC_CWD_MAX];    /* per-process working directory (absolute) */
     /* Private kernel stack: TSS.esp0 points at its top while this process
      * runs. Holds the trap frame of the interrupted user context. */
     uint8_t  stack[KERNEL_STACK] __attribute__((aligned(16)));
@@ -322,7 +325,12 @@ void      sleep_ms(uint32_t ms);
 
 /* Process */
 struct process *process_create_user(const char *name, const void *image,
-                                    size_t image_size, uint32_t arg);
+                                    size_t image_size, int argc, const char *const *argv);
+int       process_waitpid(int pid, int *status);   /* current process waits for a child */
+struct user_prog { const char *name; const uint8_t *start, *end; };
+const struct user_prog *user_prog_find(const char *name);
+extern const struct user_prog user_progs[];
+extern const int user_prog_count;
 struct process *process_create_kthread(const char *name, void (*entry)(void));
 void      process_init(void);
 void      fd_init_std(struct process *p);      /* fds 0,1,2 -> console */

@@ -1548,8 +1548,6 @@ static void cmd_gui(void) {
  * in as data; it runs in Ring 3 and talks to the kernel only via int 0x80.
  * ========================================================================= */
 
-extern const uint8_t utest_bin_start[];
-extern const uint8_t utest_bin_end[];
 
 static int parse_uint(const char **pp) {
     const char *p = *pp;
@@ -1562,8 +1560,16 @@ static int parse_uint(const char **pp) {
 }
 
 static struct process *spawn_utest(int n) {
-    struct process *p = process_create_user("utest", utest_bin_start,
-                            (size_t)(utest_bin_end - utest_bin_start), (uint32_t)n);
+    char num[12]; int l = 0, v = n;
+    char rev[12]; int rl = 0;
+    if (v == 0) rev[rl++] = '0';
+    while (v > 0) { rev[rl++] = (char)('0' + v % 10); v /= 10; }
+    while (rl) num[l++] = rev[--rl];
+    num[l] = 0;
+    const char *av[2] = { "utest", num };
+    const struct user_prog *pr = user_prog_find("utest");
+    struct process *p = pr ? process_create_user("utest", pr->start,
+                            (size_t)(pr->end - pr->start), 2, av) : NULL;
     if (!p) printf("utest: could not create process\n");
     return p;
 }
@@ -1636,7 +1642,7 @@ static void print_ok(const char *subsystem) {
  * Shell Main Loop
  * ========================================================================= */
 
-static void run_shell(void) {
+static __attribute__((unused)) void run_shell(void) {
     vga_set_color(0x0B);
     printf("\nVibeCagOS %s shell ready. Type 'help' for commands.\n\n",
            VIBECAGOS_VERSION);
@@ -1823,11 +1829,7 @@ static void run_shell(void) {
     }
 }
 
-/* Interim Ring-0 shell, run as kernel thread pid 1 (not on the boot stack).
- * It disappears from the kernel when the shell moves to Ring 3. */
-static void kshell_main(void) {
-    run_shell();
-
+static void power_off(void) {
     vfs_sync();
     printf("\nVibeCagOS halted.\n");
     outw(0x604, 0x2000);       /* QEMU ACPI poweroff */
@@ -1835,6 +1837,30 @@ static void kshell_main(void) {
     cli();
     while (1) halt();
 }
+
+#ifdef KSHELL_DEBUG
+/* Legacy Ring-0 debug shell (make KSHELL=1). NOT the default boot path. */
+static void kshell_main(void) {
+    run_shell();
+    power_off();
+}
+#else
+/*
+ * kinit (kernel thread, pid 1): the kernel's only job at boot is to start
+ * the first user process. The shell is an ordinary Ring-3 program ("sh");
+ * when it exits there is nothing left to run, so the machine powers off.
+ */
+static void kinit_main(void) {
+    const struct user_prog *sh = user_prog_find("sh");
+    if (!sh) PANIC("no 'sh' program embedded");
+    const char *av[1] = { "sh" };
+    struct process *p = process_create_user("sh", sh->start, (size_t)(sh->end - sh->start), 1, av);
+    if (!p) PANIC("cannot start the user shell");
+    int code = process_wait(p);
+    KINFO("INIT", "sh exited with %d", code);
+    power_off();
+}
+#endif
 
 /* =========================================================================
  * kernel_main — Entry point called by boot.s
@@ -2002,8 +2028,13 @@ void kernel_main(uint32_t mb_magic, struct multiboot_info *mb_info) {
 
     /* --- Phase 4: Process subsystem --- */
     process_init();                                   /* idle = pid 0 */
+#ifdef KSHELL_DEBUG
     if (!process_create_kthread("kshell", kshell_main))   /* pid 1 */
         PANIC("cannot create kernel shell thread");
+#else
+    if (!process_create_kthread("kinit", kinit_main))     /* pid 1 */
+        PANIC("cannot create init thread");
+#endif
     print_ok("Process scheduler (preemptive, Ring 3 capable)");
     printf("\n");
 

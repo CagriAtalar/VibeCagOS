@@ -1,4 +1,4 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-all
+.PHONY: all clean run run-window run-gdb debug image disk help run-smp test test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-all
 
 # ============================================================
 # VibeCagOS Build System
@@ -28,10 +28,15 @@ FS_DIR     := src/fs
 NET_DIR    := src/net
 
 # Common include path
+# make KSHELL=1  -> boot the legacy Ring-0 debug shell instead of the user shell
+ifeq ($(KSHELL),1)
+CFLAGS += -DKSHELL_DEBUG
+endif
+
 INCLUDES := -Isrc -Isrc/abi -I$(KERNEL_DIR) -I$(DRIVER_DIR) -I$(FS_DIR) -I$(NET_DIR)
 
 # All object files
-OBJS := boot.o interrupts.o process.o syscall.o sysfile.o usercopy.o userblob.o \
+OBJS := boot.o interrupts.o process.o syscall.o sysfile.o progs.o usercopy.o userblob.o \
         vga.o ide.o pci.o rtl8139.o rtc.o mouse.o gui.o \
         vibefs.o vfs.o procfs.o devfs.o \
         kmalloc.o klog.o pmm.o vmm.o \
@@ -70,6 +75,9 @@ syscall.o: $(KERNEL_DIR)/syscall.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/usercopy
 sysfile.o: $(KERNEL_DIR)/sysfile.c $(KERNEL_DIR)/sysfile.h $(KERNEL_DIR)/kernel.h src/abi/syscall.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+progs.o: $(KERNEL_DIR)/progs.c $(KERNEL_DIR)/kernel.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 usercopy.o: $(KERNEL_DIR)/usercopy.c $(KERNEL_DIR)/usercopy.h $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/vmm.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -81,23 +89,30 @@ USER_CFLAGS := -std=c11 -O1 -m32 -ffreestanding -nostdlib -fno-pie -no-pie \
 user_crt0.o: src/user/crt0.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-utest.o: src/user/utest.c src/user/ulib.h src/abi/syscall.h
+# Every user program = crt0 + its own .c + the tiny user library (ulib.c).
+USER_PROGS := sh utest
+USER_LIB_OBJS := user_crt0.o user_ulib.o
+
+user_ulib.o: src/user/ulib.c src/user/ulib.h src/abi/syscall.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-utest.elf: user_crt0.o utest.o src/user/user.ld
-	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,-Map=utest.map -o $@ user_crt0.o utest.o
+user_%.o: src/user/%.c src/user/ulib.h src/abi/syscall.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-utest.bin: utest.elf
+%.elf: user_%.o $(USER_LIB_OBJS) src/user/user.ld
+	$(CC) $(USER_CFLAGS) -Wl,-Tsrc/user/user.ld -Wl,-Map=$*.map -o $@ $(USER_LIB_OBJS) user_$*.o
+
+%.bin: %.elf
 	$(OBJCOPY) -O binary $< $@
 
 # Phase 1 of the plan: embed the user binary in the kernel image.
-userblob.o: $(KERNEL_DIR)/userblob.s utest.bin
+userblob.o: $(KERNEL_DIR)/userblob.s $(addsuffix .bin,$(USER_PROGS))
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 # Kernel C files
 kernel.o: $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/kernel.h $(KERNEL_DIR)/common.h \
            $(KERNEL_DIR)/pmm.h $(KERNEL_DIR)/vmm.h $(KERNEL_DIR)/multiboot.h \
-           $(FS_DIR)/vibefs.h $(FS_DIR)/vfs.h $(DRIVER_DIR)/vga.h $(DRIVER_DIR)/ide.h \
+           $(DRIVER_DIR)/vga.h $(DRIVER_DIR)/ide.h \
            $(DRIVER_DIR)/pci.h $(DRIVER_DIR)/rtl8139.h $(DRIVER_DIR)/rtc.h \
            $(DRIVER_DIR)/mouse.h $(DRIVER_DIR)/gui.h \
            $(NET_DIR)/ethernet.h $(NET_DIR)/arp.h $(NET_DIR)/ipv4.h \
@@ -231,7 +246,11 @@ test-stdio: os.iso disk.img
 	@tests/run.sh stdio
 test-fs: os.iso disk.img
 	@tests/run.sh fs
-test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs
+test-shell: os.iso disk.img
+	@tests/run.sh shell
+test-proc: os.iso disk.img
+	@tests/run.sh proc
+test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio test-fs test-shell test-proc
 
 # GDB debugging: Terminal 1 = make debug, Terminal 2 = gdb kernel.elf
 debug: os.iso disk.img

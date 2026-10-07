@@ -16,6 +16,7 @@
 #include "../abi/syscall.h"
 
 #include "sysfile.h"
+#include "../drivers/vga.h"
 
 static int sys_getinfo(void *ubuf) {
     struct vibe_info info;
@@ -44,6 +45,13 @@ void syscall_dispatch(struct trap_frame *f) {
     case SYS_RMDIR:   ret = sys_rmdir((const char *)a1);         break;
     case SYS_LSEEK:   ret = sys_lseek(a1, (int)a2, a3);          break;
     case SYS_READDIR: ret = sys_readdir(a1, (void *)a2, a3);     break;
+    case SYS_SPAWN:   ret = sys_spawn((const char *)a1, (const char *const *)a2); break;
+    case SYS_WAITPID: ret = sys_waitpid((int)a1, (int *)a2);     break;
+    case SYS_CHDIR:   ret = sys_chdir((const char *)a1);         break;
+    case SYS_GETCWD:  ret = sys_getcwd((char *)a1, a2);          break;
+    case SYS_RENAME:  ret = sys_rename((const char *)a1, (const char *)a2); break;
+    case SYS_KILL:    ret = sys_kill((int)a1);                   break;
+    case SYS_CLEAR:   vga_clear(); ret = 0;                      break;
     case SYS_GETPID:  ret = current_proc->pid;                   break;
     case SYS_SLEEP:   sleep_ms(a1); ret = 0;                     break;
     case SYS_YIELD:   yield();      ret = 0;                     break;

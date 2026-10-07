@@ -68,11 +68,50 @@ static int vfs_err(int r) {
     }
 }
 
+/* Make `in` absolute against `cwd` and normalise "." / ".." / "//". */
+static int path_resolve(const char *cwd, const char *in, char *out, size_t outsz) {
+    char tmp[VFS_PATH_MAX];
+    size_t n = 0;
+    if (in[0] != '/') {
+        size_t cl = strlen(cwd);
+        if (cl + 1 + strlen(in) + 1 > sizeof(tmp)) return -E_NAMETOOLONG;
+        memcpy(tmp, cwd, cl); n = cl;
+        if (n == 0 || tmp[n - 1] != '/') tmp[n++] = '/';
+    }
+    size_t il = strlen(in);
+    if (n + il + 1 > sizeof(tmp)) return -E_NAMETOOLONG;
+    memcpy(tmp + n, in, il + 1);
+
+    size_t o = 0;
+    if (outsz < 2) return -E_NAMETOOLONG;
+    out[o++] = '/';
+    const char *p = tmp;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *seg = p;
+        while (*p && *p != '/') p++;
+        size_t sl = (size_t)(p - seg);
+        if (sl == 1 && seg[0] == '.') continue;
+        if (sl == 2 && seg[0] == '.' && seg[1] == '.') {
+            if (o > 1) { o--; while (o > 1 && out[o - 1] != '/') o--; }
+            continue;
+        }
+        if (o + sl + 1 >= outsz) return -E_NAMETOOLONG;
+        if (o > 1) out[o++] = '/';
+        memcpy(out + o, seg, sl); o += sl;
+    }
+    if (o > 1 && out[o - 1] == '/') o--;
+    out[o] = 0;
+    return 0;
+}
+
 static int get_path(const char *upath, char *kbuf) {
-    int n = strncpy_from_user(kbuf, upath, VFS_PATH_MAX);
+    char raw[VFS_PATH_MAX];
+    int n = strncpy_from_user(raw, upath, sizeof(raw));
     if (n < 0) return n == -E_INVAL ? -E_NAMETOOLONG : n;
     if (n == 0) return -E_NOENT;
-    return 0;
+    return path_resolve(current_proc->cwd[0] ? current_proc->cwd : "/", raw, kbuf, VFS_PATH_MAX);
 }
 
 /* ---- read / write ------------------------------------------------------ */
@@ -249,4 +288,89 @@ int sys_readdir(uint32_t fd, void *udirent, uint32_t max) {
     strncpy(o.name, d.name, VIBE_NAME_MAX);
     int r = copy_to_user(udirent, &o, sizeof(o));
     return r < 0 ? r : 1;
+}
+
+/* ---- cwd / rename ------------------------------------------------------ */
+
+int sys_chdir(const char *upath) {
+    char path[VFS_PATH_MAX];
+    int r = get_path(upath, path);
+    if (r < 0) return r;
+    struct vstat st;
+    r = vfs_stat(path, &st);
+    if (r < 0) return vfs_err(r);
+    if (st.type != VFS_TYPE_DIR) return -E_NOTDIR;
+    if (strlen(path) >= PROC_CWD_MAX) return -E_NAMETOOLONG;
+    strcpy(current_proc->cwd, path);
+    return 0;
+}
+
+int sys_getcwd(char *ubuf, uint32_t size) {
+    const char *cwd = current_proc->cwd[0] ? current_proc->cwd : "/";
+    uint32_t n = (uint32_t)strlen(cwd) + 1;
+    if (size < n) return -E_INVAL;
+    int r = copy_to_user(ubuf, cwd, n);
+    return r < 0 ? r : (int)(n - 1);
+}
+
+int sys_rename(const char *uold, const char *unew) {
+    char a[VFS_PATH_MAX], b[VFS_PATH_MAX];
+    int r = get_path(uold, a);
+    if (r < 0) return r;
+    r = get_path(unew, b);
+    if (r < 0) return r;
+    return vfs_err(vfs_rename(a, b));
+}
+
+/* ---- process control --------------------------------------------------- */
+
+int sys_spawn(const char *uname, const char *const *uargv) {
+    char name[32];
+    int r = strncpy_from_user(name, uname, sizeof(name));
+    if (r < 0) return r == -E_INVAL ? -E_NAMETOOLONG : r;
+    const struct user_prog *prog = user_prog_find(name);
+    if (!prog) return -E_NOENT;
+
+    static char args[SPAWN_ARGS_MAX][SPAWN_ARG_LEN];     /* non-reentrant: syscalls don't preempt */
+    const char *argp[SPAWN_ARGS_MAX];
+    int argc = 0;
+    if (uargv) {
+        for (;; argc++) {
+            if (argc >= SPAWN_ARGS_MAX) return -E_INVAL;
+            const char *up;
+            r = copy_from_user(&up, uargv + argc, sizeof(up));
+            if (r < 0) return r;
+            if (!up) break;
+            r = strncpy_from_user(args[argc], up, SPAWN_ARG_LEN);
+            if (r < 0) return r == -E_INVAL ? -E_NAMETOOLONG : r;
+            argp[argc] = args[argc];
+        }
+    }
+    if (argc == 0) { argp[0] = name; argc = 1; }
+
+    struct process *c = process_create_user(name, prog->start,
+                            (size_t)(prog->end - prog->start), argc, argp);
+    if (!c) return -E_NOMEM;
+    uint32_t fl = irq_save();
+    c->ppid = current_proc->pid;
+    strcpy(c->cwd, current_proc->cwd[0] ? current_proc->cwd : "/");
+    irq_restore(fl);
+    return c->pid;
+}
+
+int sys_waitpid(int pid, int *ustatus) {
+    if (ustatus && !user_range_valid(ustatus, sizeof(int), true)) return -E_FAULT;
+    int status = 0;
+    int r = process_waitpid(pid, &status);          /* may block */
+    if (r > 0 && ustatus) copy_to_user(ustatus, &status, sizeof(status));
+    return r;
+}
+
+int sys_kill(int pid) {
+    if (pid == current_proc->pid) return -E_INVAL;
+    int r = process_kill(pid);
+    if (r == 0) return 0;
+    if (r == -1) return -E_PERM;
+    if (r == -2) return 0;                          /* already a zombie */
+    return -E_SRCH;
 }

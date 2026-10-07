@@ -1,6 +1,6 @@
 #!/bin/sh
 # Deterministic QEMU serial tests for the Ring-3 / syscall / scheduler work.
-# usage: tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs>
+# usage: tests/run.sh <ring3|syscall|scheduler|usercopy|faults|stdio|fs|shell|proc>
 # Boots os.iso headless, types shell commands over the serial port, captures
 # the serial log and greps for expected lines. Exit code != 0 on any failure.
 QEMU=${QEMU:-qemu-system-i386}
@@ -13,9 +13,11 @@ trap 'rm -f "$IMG" "$LOG"' EXIT
 case $SUITE in
   ring3)     CMDS="utest 0|utest 12|ps" ;;
   syscall)   CMDS="utest 1|utest 2|utest 6" ;;
-  scheduler) CMDS="utest2 4 5|uspawn 4|utest 6|ps" ;;
+  scheduler) CMDS="utest 4 &|utest 5 &|wait|utest 4 &|utest 6|wait|ps" ;;
   usercopy)  CMDS="utest 7|ps" ;;
   stdio)     CMDS="utest 13|utest 14<abc|utest 16|utest 16|ps" ;;
+  shell)     CMDS="pwd|mkdir /a|cd /a|pwd|echo hi there > f.txt|cat f.txt|cp f.txt g.txt|ls|mv g.txt h.txt|stat h.txt|head h.txt|cd ..|rm /a/f.txt|rm /a/h.txt|rmdir /a|ls|uname|ps|cat /proc/meminfo|nosuch|kill 9999|ls /nonexistent|cd /nonexistent|write w.txt hello world|cat w.txt|echo more >> w.txt|cat w.txt|hexdump w.txt|rm w.txt|utest 19|pwd|date|devices" ;;
+  proc)      CMDS="free|utest 17 &|ps|kill 3|ps|wait|utest 18|utest 20|ps|kill 8|sleep 300|ps|free" ;;
   fs)        CMDS="utest 15|utest 15|utest 16|ps" ;;
   faults)    CMDS="utest 3|utest 8|utest 9|utest 10|utest 11|utest 0|ps" ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
@@ -28,7 +30,7 @@ $QEMU $QEMU_EXTRA -cdrom os.iso -drive file="$IMG",format=raw,if=ide \
       -no-reboot -m 128M -serial stdio -display none < "$FIFO" > "$LOG" 2>&1 &
 QPID=$!
 exec 3> "$FIFO"
-prompts() { tr -d '\r' < "$LOG" | grep -ac 'vcos:/\$ '; }
+prompts() { tr -d '\r' < "$LOG" | grep -aEc 'vcos:[^ ]*\$ '; }
 wait_prompts() {   # $1 = wanted prompt count, 30 s limit
   i=0; while [ "$(prompts)" -lt "$1" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 }
@@ -58,8 +60,8 @@ case $SUITE in
  ring3)
   expect 'T0: hello from ring3'            'user code runs'
   expect 'T0: cs&3=3 ss&3=3 IF=1'          'CPL=3 for CS and SS, IF=1'
-  expect 'pid [0-9]+ finished, exit code 0' 'process exits cleanly'
-  expect 'finished, exit code 42'          'exit status propagated'
+  expect '\[pid [0-9]+\] exit code 0' 'process exits cleanly'
+  expect '\[pid [0-9]+\] exit code 42'  'exit status propagated'
   reject 'zombie|ZOMBIE  utest'            'no zombie left after wait' ;;
  syscall)
   expect 'T1: getpid=1'                    'SYS_GETPID'
@@ -71,8 +73,9 @@ case $SUITE in
   expect 'T6: slept_ok=1'                  'SYS_SLEEP ~300ms then wakeup' ;;
  scheduler)
   expect 'A+B+A|B+A+B'                     'A and B interleave without yield (preemption)'
-  expect 'exit 10, pid [0-9]+ exit 11'     'both finish with own exit codes'
-  expect '\[uspawn\] pid'                  'background process spawned'
+  expect '\[pid [0-9]+\] exit code 10'     'A exits with its own code'
+  expect '\[pid [0-9]+\] exit code 11'     'B exits with its own code'
+  expect '\[pid [0-9]+\] started'          'background process spawned (shell stays interactive)'
   expect 'T6: slept_ok=1'                  'sleep works while others run' ;;
  usercopy)
   expect 'T7: write_null=-14'              'NULL'
@@ -84,6 +87,50 @@ case $SUITE in
   expect 'T7: getinfo_ok=0 pid_ok=1'       'valid copy_to_user works'
   expect 'T7: done'                        'kernel survived'
   reject 'PANIC|EXCEPTION'                 'no kernel panic' ;;
+ shell)
+  expect '^/a$'                            'cd updates per-process cwd; pwd'
+  expect '^hi there$'                      'echo > file ; cat'
+  expect '^-  f.txt'                       'ls shows f.txt'
+  expect '^-  g.txt'                       'cp created g.txt (mv checked by stat h.txt)'
+  expect 'Size: 9'                         'stat'
+  reject '^d  a$'                          'rm + rmdir removed /a'
+  expect 'VibeCagOS 0.5.0'                 'uname (procfs)'
+  expect 'RUNNING   sh'                    'ps shows the shell as a user process'
+  expect 'MemTotal|Total|Free'             'meminfo (procfs)'
+  expect 'sh: nosuch: command not found'   'unknown command'
+  expect 'kill: 9999: No such process'     'kill missing pid -> ESRCH'
+  expect 'ls: /nonexistent: No such file'  'ls error'
+  expect 'cd: /nonexistent: No such file'  'cd error'
+  expect '^hello world$'                   'write + cat'
+  expect '^more$'                          'echo >> appends'
+  expect '68 65 6c 6c 6f'                  'hexdump'
+  expect 'T19: chdir=0'                    'child chdir works'
+  expect 'T19: cwd=/proc'                  'child sees its own cwd'
+  expect 'T19: relative_open_ok=1'         'relative path resolved against child cwd'
+  expect 'T19: chdir_file=-20'             'chdir to a file -> ENOTDIR'
+  expect 'T19: dotdot=0 /'                 '.. normalisation'
+  expect 'vcos:/\$ pwd'                    'parent cwd unchanged by child chdir'
+  expect 'UTC'                             'date'
+  expect 'Detected Devices'                'devices'
+  reject 'PANIC|EXCEPTION|killed'          'no panic / no kill' ;;
+ proc)
+  expect '\[pid 3\] started'               'background spawn gets pid 3'
+  expect 'SLEEPING  utest'                 'ps shows sleeping child'
+  expect 'kill: terminated pid 3'          'kill'
+  expect 'ZOMBIE    utest'                 'killed child is a zombie until reaped'
+  expect '\[pid 3\] exit code -9'          'wait reaps it with status -9'
+  expect 'T18: spawned=1'                  'Ring 3 spawn x2'
+  expect 'T18: wait1=1 st1=42 wait2=1 st2=0' 'waitpid(pid) and waitpid(-1) return child status'
+  expect 'T18: no_more_children=-10'      'waitpid with no children -> ECHILD'
+  expect 'T18: spawn_missing=-2'           'spawn unknown program -> ENOENT'
+  expect 'T18: spawn_badptr=-14'           'spawn bad pointer -> EFAULT'
+  expect 'T18: wait_badptr=-14'            'waitpid bad pointer -> EFAULT'
+  expect '\[pid [0-9]+\] exit code 7'      'parent exit code'
+  expect 'T20: child_spawned=1'            'orphan scenario: parent exits first'
+  expect 'kill: terminated pid 8'          'orphaned child (ppid -1) can be killed'
+  nframes=$(grep -a '^FramesFree' "$LOG" | awk '{print $2}' | sort -u | wc -l)
+  if [ "$nframes" = 1 ]; then echo "  PASS  no frame leak (FramesFree identical before/after)"; else echo "  FAIL  frame leak: $(grep -a '^FramesFree' "$LOG" | tr '\n' ' ')"; FAIL=1; fi
+  reject 'PANIC|EXCEPTION'                 'no panic' ;;
  stdio)
   expect 'T13: stdout=ok2'                 'write(1) works'
   expect 'T13: stderr=ok2'                 'write(2) works'

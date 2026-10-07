@@ -27,3 +27,28 @@ static inline int sys_unlink(const char *p)                  { return syscall3(S
 static inline int sys_rmdir(const char *p)                   { return syscall3(SYS_RMDIR, (u32)p, 0, 0); }
 static inline int sys_lseek(int fd, int off, int wh)         { return syscall3(SYS_LSEEK, (u32)fd, (u32)off, (u32)wh); }
 static inline int sys_readdir(int fd, struct vibe_dirent *d, u32 max) { return syscall3(SYS_READDIR, (u32)fd, (u32)d, max); }
+static inline int sys_spawn(const char *name, const char *const *argv) { return syscall3(SYS_SPAWN, (u32)name, (u32)argv, 0); }
+static inline int sys_waitpid(int pid, int *status)          { return syscall3(SYS_WAITPID, (u32)pid, (u32)status, 0); }
+static inline int sys_chdir(const char *p)                   { return syscall3(SYS_CHDIR, (u32)p, 0, 0); }
+static inline int sys_getcwd(char *b, u32 n)                 { return syscall3(SYS_GETCWD, (u32)b, n, 0); }
+static inline int sys_rename(const char *a, const char *b)   { return syscall3(SYS_RENAME, (u32)a, (u32)b, 0); }
+static inline int sys_kill(int pid)                          { return syscall3(SYS_KILL, (u32)pid, 0, 0); }
+static inline int sys_clear(void)                            { return syscall3(SYS_CLEAR, 0, 0, 0); }
+
+/* ---- tiny libc (ulib.c). No kernel code is reachable from here. ---- */
+typedef unsigned int usize;
+usize  strlen(const char *s);
+int    strcmp(const char *a, const char *b);
+int    strncmp(const char *a, const char *b, usize n);
+char  *strcpy(char *d, const char *s);
+char  *strncpy(char *d, const char *s, usize n);
+void  *memcpy(void *d, const void *s, usize n);
+void  *memmove(void *d, const void *s, usize n);
+void  *memset(void *d, int c, usize n);
+int    memcmp(const void *a, const void *b, usize n);
+int    atoi(const char *s);
+/* printf to a file descriptor: %s %d %u %x %c %% with optional '-', '0', width */
+int    uprintf(int fd, const char *fmt, ...);
+int    uputs(int fd, const char *s);
+/* Read a line from fd 0 with echo + backspace. Returns length, or -1 on error. */
+int    ugetline(char *buf, int max);

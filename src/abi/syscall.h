@@ -25,6 +25,15 @@
  *   SYS_LSEEK   (fd, off, whence) -> new offset
  *   SYS_READDIR (fd, vibe_dirent*, max) -> count (0 = end)     writes buf
  *
+ *   SYS_SPAWN   (name, argv) -> pid  create child from a built-in program;
+ *                                    argv = NULL-terminated array of strings (<= SPAWN_ARGS_MAX)
+ *   SYS_WAITPID (pid|-1, int *status) BLOCKS until a child exits; reaps it; -ECHILD if none
+ *   SYS_CHDIR   (path)              per-process working directory
+ *   SYS_GETCWD  (buf, size) -> len
+ *   SYS_RENAME  (old, new)
+ *   SYS_KILL    (pid)               terminates another process
+ *   SYS_CLEAR   ()                  clear the console
+ *
  * File descriptors: per-process table. fd 0 = stdin (console, read only),
  * fd 1 = stdout, fd 2 = stderr (console, write only). New fds are the
  * lowest free index >= 3.
@@ -50,9 +59,18 @@
 #define SYS_READDIR 16
 #define SYS_RMDIR   17
 #define SYS_FSTAT   18
-#define SYS_MAX     18
+#define SYS_SPAWN   19
+#define SYS_WAITPID 20
+#define SYS_CHDIR   21
+#define SYS_GETCWD  22
+#define SYS_RENAME  23
+#define SYS_KILL    24
+#define SYS_CLEAR   25
+#define SYS_MAX     25
 
 #define E_PERM    1
+#define E_SRCH    3
+#define E_CHILD  10
 #define E_NOENT   2
 #define E_IO      5
 #define E_BADF    9
@@ -109,6 +127,8 @@ struct vibe_info {
 
 /* Flat user image header ("VBIN"), at offset 0 of every user binary.
  * All offsets are relative to USER_BASE. */
+#define SPAWN_ARGS_MAX 8
+#define SPAWN_ARG_LEN  96
 #define VBIN_MAGIC 0x4E494256u   /* 'V' 'B' 'I' 'N' little endian */
 struct vbin_header {
     unsigned int magic;

@@ -5,7 +5,7 @@
  */
 #include "ulib.h"
 
-static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int slen(const char *s) { return (int)strlen(s); }
 static void puts_(const char *s) { sys_write(1, s, (u32)slen(s)); }
 static void putint(int v) {
     char b[16]; int i = 15; b[i] = 0;
@@ -19,7 +19,8 @@ static void busy(volatile unsigned n) { while (n--) ; }
 static const char rodata_probe[16] = "ro";   /* lives in read-only pages */
 static volatile int data_probe = 1234;        /* read-write page */
 
-int user_main(int test) {
+int user_main(int argc, char **argv) {
+    int test = argc > 1 ? atoi(argv[1]) : -1;
     switch (test) {
     case 0: {   /* Ring 3 entry: CS/SS RPL must be 3, interrupts enabled */
         unsigned cs, ss, fl;
@@ -50,11 +51,11 @@ int user_main(int test) {
         return 0;
     }
     case 4: {   /* preemption: A (no yield) */
-        for (int i = 0; i < 10; i++) { sys_putchar('A'); busy(6000000); }
+        for (int i = 0; i < 40; i++) { sys_putchar('A'); busy(6000000); }
         return 10;
     }
     case 5: {   /* preemption: B (no yield) */
-        for (int i = 0; i < 10; i++) { sys_putchar('B'); busy(6000000); }
+        for (int i = 0; i < 40; i++) { sys_putchar('B'); busy(6000000); }
         return 11;
     }
     case 6: {   /* sleep ~300 ms, report elapsed */
@@ -179,6 +180,39 @@ int user_main(int test) {
         for (int i = 0; i < n; i++) sys_close(fds[i]);
         puts_("T16: reopen="); putint(sys_open("/", O_RDONLY, 0)); puts_("\n");
         return 0;     /* exits WITH an fd still open: kernel must release it */
+    }
+    case 17: {  /* long sleeper: target for kill/wait tests */
+        for (;;) sys_sleep(1000);
+    }
+    case 18: {  /* spawn/wait from Ring 3: parent starts 2 children, reaps both */
+        const char *a1[] = { "utest", "12", 0 };
+        const char *a2[] = { "utest", "0", 0 };
+        int p1 = sys_spawn("utest", a1), p2 = sys_spawn("utest", a2);
+        puts_("T18: spawned="); putint(p1 > 0 && p2 > 0 && p1 != p2); puts_("\n");
+        int st1 = -1, st2 = -1, r1 = sys_waitpid(p1, &st1), r2 = sys_waitpid(-1, &st2);
+        puts_("T18: wait1="); putint(r1 == p1); puts_(" st1="); putint(st1);
+        puts_(" wait2="); putint(r2 == p2); puts_(" st2="); putint(st2); puts_("\n");
+        puts_("T18: no_more_children="); putint(sys_waitpid(-1, &st1)); puts_("\n");
+        puts_("T18: spawn_missing="); putint(sys_spawn("nonexistent", 0)); puts_("\n");
+        puts_("T18: spawn_badptr="); putint(sys_spawn((const char *)0x00100000, 0)); puts_("\n");
+        puts_("T18: wait_badptr="); putint(sys_waitpid(-1, (int *)0x00100000)); puts_("\n");
+        return 7;
+    }
+    case 19: {  /* per-process cwd: chdir in a child must not affect the parent */
+        char b[64];
+        puts_("T19: chdir="); putint(sys_chdir("/proc")); puts_("\n");
+        sys_getcwd(b, sizeof(b)); puts_("T19: cwd="); puts_(b); puts_("\n");
+        int fd = sys_open("version", O_RDONLY, 0);       /* relative to /proc */
+        puts_("T19: relative_open_ok="); putint(fd >= 3); puts_("\n");
+        puts_("T19: chdir_file="); putint(sys_chdir("/proc/version")); puts_("\n");
+        puts_("T19: dotdot="); putint(sys_chdir("../proc/../")); sys_getcwd(b, sizeof(b)); puts_(" "); puts_(b); puts_("\n");
+        return 0;
+    }
+    case 20: {  /* parent exits while its child still runs -> child is orphaned */
+        const char *a[] = { "utest", "17", 0 };
+        int c = sys_spawn("utest", a);
+        puts_("T20: child_spawned="); putint(c > 0); puts_("\n");
+        return 0;                      /* exits WITHOUT waiting */
     }
     case 12: {  /* exit status */
         return 42;

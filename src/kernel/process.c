@@ -221,8 +221,57 @@ struct process *process_create_kthread(const char *name, void (*entry)(void)) {
  *                 USER_STACK_TOP; the page below is left unmapped (guard)
  *   `arg` is delivered in EAX at entry (crt0 passes it to user_main).
  */
+/* Write bytes into the (already mapped, writable) user stack of address
+ * space `pd` through the identity map. Returns false if unmapped. */
+static bool ustack_put(uint32_t *pd, uint32_t va, const void *src, size_t n) {
+    const uint8_t *s = (const uint8_t *)src;
+    while (n) {
+        paddr_t pa;
+        if (!vmm_user_lookup(pd, va, VMM_FLAG_USER | VMM_FLAG_WRITABLE, &pa)) return false;
+        size_t chunk = PAGE_SIZE - (va & 0xFFFu);
+        if (chunk > n) chunk = n;
+        memcpy((void *)pa, s, chunk);
+        s += chunk; va += (uint32_t)chunk; n -= chunk;
+    }
+    return true;
+}
+
+/*
+ * Initial user stack (esp points at argc), System-V style:
+ *
+ *   high  | "arg0\0arg1\0..."   |
+ *         | argv[argc] = NULL   |
+ *         | argv[argc-1] ...    |
+ *         | argv[0]             |  <- argv
+ *   esp-> | argc                |
+ *   low
+ * crt0 hands (argc, argv) to user_main().
+ */
+static bool build_user_stack(struct process *p, int argc, const char *const *argv) {
+    uint32_t va = USER_STACK_TOP - 16;
+    uint32_t ptrs[SPAWN_ARGS_MAX + 1];
+    if (argc < 0 || argc > SPAWN_ARGS_MAX) return false;
+
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(argv[i]) + 1;
+        if (len > SPAWN_ARG_LEN) return false;
+        va -= (uint32_t)len;
+        if (!ustack_put(p->page_table, va, argv[i], len)) return false;
+        ptrs[i] = va;
+    }
+    ptrs[argc] = 0;
+    va &= ~15u;
+    va -= 4u * (uint32_t)(argc + 1);
+    if (!ustack_put(p->page_table, va, ptrs, 4u * (uint32_t)(argc + 1))) return false;
+    va -= 4;
+    uint32_t n = (uint32_t)argc;
+    if (!ustack_put(p->page_table, va, &n, 4)) return false;
+    p->user_esp = va;
+    return true;
+}
+
 struct process *process_create_user(const char *name, const void *image,
-                                    size_t image_size, uint32_t arg) {
+                                    size_t image_size, int argc, const char *const *argv) {
     const struct vbin_header *h = (const struct vbin_header *)image;
     if (image_size < sizeof(*h) || h->magic != VBIN_MAGIC) return NULL;
     if (h->file_size > image_size || h->file_size > h->mem_size) return NULL;
@@ -263,8 +312,9 @@ struct process *process_create_user(const char *name, const void *image,
 
     p->page_table = pd;
     p->user_entry = h->entry;
-    p->user_esp   = USER_STACK_TOP - 16;
     p->ppid       = 0;
+    if (!build_user_stack(p, argc, argv)) { p->page_table = NULL; goto fail; }
+    strcpy(p->cwd, "/");
     strncpy(p->name, name, sizeof(p->name) - 1);
     fd_init_std(p);
 
@@ -276,7 +326,7 @@ struct process *process_create_user(const char *name, const void *image,
     struct trap_frame *tf = (struct trap_frame *)(top - sizeof(*tf));
     memset(tf, 0, sizeof(*tf));
     tf->gs = tf->fs = tf->es = tf->ds = SEL_USER_DATA;
-    tf->eax      = arg;
+    tf->eax      = (uint32_t)argc;
     tf->eip      = p->user_entry;
     tf->cs       = SEL_USER_CODE;
     tf->eflags   = 0x202;                 /* IF=1, reserved bit 1 */
@@ -301,13 +351,37 @@ fail:
 /* Exit / wait / kill                                                       */
 /* ------------------------------------------------------------------------ */
 
+static struct process *find_pid(int pid) {
+    for (int i = 0; i < PROCS_MAX; i++)
+        if (procs[i].state != PROC_UNUSED && procs[i].pid == pid) return &procs[i];
+    return NULL;
+}
+
+/* Children of a dying process become detached (ppid -1): the idle thread
+ * reaps them when they exit. IF must be 0. */
+static void orphan_children(struct process *p) {
+    for (int i = 0; i < PROCS_MAX; i++)
+        if (procs[i].state != PROC_UNUSED && procs[i].ppid == p->pid && p != &procs[i])
+            procs[i].ppid = -1;
+}
+
+/* Common tail of exit/kill. IF must be 0. */
+static void make_zombie(struct process *p, int code) {
+    fd_close_all(p);
+    orphan_children(p);
+    p->exit_code = code;
+    p->state     = PROC_ZOMBIE;
+    wakeup(p);                                   /* kernel process_wait() */
+    if (p->ppid > 0) {
+        struct process *par = find_pid(p->ppid);
+        if (par) wakeup(par);                    /* user waitpid() */
+    }
+}
+
 void process_exit(int code) {
     cli();
     struct process *p = current_proc;
-    fd_close_all(p);                    /* release open files */
-    p->exit_code = code;
-    p->state     = PROC_ZOMBIE;
-    wakeup(p);                          /* process_wait() sleeps on the child */
+    make_zombie(p, code);
     schedule_locked();                  /* never returns: zombies don't run */
     PANIC("zombie pid %d was scheduled", p->pid);
     for (;;) halt();
@@ -326,17 +400,39 @@ int process_wait(struct process *p) {
     return code;
 }
 
+/* waitpid(): reap a zombie child of the CURRENT process. pid == -1: any. */
+int process_waitpid(int pid, int *status) {
+    struct process *me = current_proc;
+    uint32_t fl = irq_save();
+    for (;;) {
+        bool have_child = false;
+        for (int i = 0; i < PROCS_MAX; i++) {
+            struct process *c = &procs[i];
+            if (c->state == PROC_UNUSED || c->ppid != me->pid || c == me) continue;
+            if (pid != -1 && c->pid != pid) continue;
+            have_child = true;
+            if (c->state == PROC_ZOMBIE) {
+                int cpid = c->pid;
+                if (status) *status = c->exit_code;
+                vmm_destroy_address_space(c->page_table);
+                memset(c, 0, sizeof(*c));
+                irq_restore(fl);
+                return cpid;
+            }
+        }
+        if (!have_child) { irq_restore(fl); return -E_CHILD; }
+        block_on(me);                    /* woken by make_zombie(child) */
+    }
+}
+
 int process_kill(int pid) {
-    if (pid <= 1) return -1;                 /* idle + kernel shell */
+    if (pid <= 1) return -1;                 /* idle + kernel init/shell */
     uint32_t fl = irq_save();
     for (int i = 2; i < PROCS_MAX; i++) {
         struct process *p = &procs[i];
         if (p->pid == pid && p->state != PROC_UNUSED && p != current_proc) {
             if (p->state == PROC_ZOMBIE) { irq_restore(fl); return -2; }
-            fd_close_all(p);
-            p->exit_code = -9;
-            p->state     = PROC_ZOMBIE;
-            wakeup(p);
+            make_zombie(p, -9);
             irq_restore(fl);
             return 0;
         }

@@ -29,6 +29,8 @@
 #include "kernel/kernel.h"
 #include "kernel/klog.h"
 #include "kernel/pmm.h"
+#include "drivers/pci.h"
+#include "drivers/rtc.h"
 
 /* =========================================================================
  * Forward declarations from kernel subsystems
@@ -42,7 +44,7 @@ extern struct process procs[];
 extern paddr_t next_paddr;
 extern char __free_ram[], __free_ram_end[];
 
-#define VIBECAGOS_VERSION "0.4.0"
+#define VIBECAGOS_VERSION "0.5.0"
 
 /* =========================================================================
  * Content generation buffer
@@ -166,24 +168,79 @@ static int gen_cpuinfo(char *buf) {
 
 static int gen_tasks(char *buf) {
     int pos = 0;
+    /* indexed by PROC_* (kernel.h): UNUSED RUNNABLE RUNNING SLEEPING ZOMBIE BLOCKED CREATED */
     const char *state_names[] = {
-        "UNUSED", "RUNNABLE", "RUNNING", "SLEEPING", "ZOMBIE", "BLOCKED"
+        "UNUSED", "RUNNABLE", "RUNNING", "SLEEPING", "ZOMBIE", "BLOCKED", "CREATED"
     };
 
-    proc_append(buf, &pos, "PID   STATE       NAME\n");
-    proc_append(buf, &pos, "----  ----------  ----------------\n");
+    proc_append(buf, &pos, "PID   PPID  STATE     NAME\n");
+    proc_append(buf, &pos, "----  ----  --------  ----------------\n");
 
-    for (int i = 0; i < 16; i++) {  /* PROCS_MAX = 16 */
-        if (procs[i].state == 0) continue;  /* PROC_UNUSED */
+    for (int i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) continue;
         proc_append_u32(buf, &pos, (uint32_t)procs[i].pid);
-        proc_append(buf, &pos, "     ");
+        proc_append(buf, &pos, procs[i].pid < 10 ? "     " : procs[i].pid < 100 ? "    " : "   ");
+        if (procs[i].ppid > 0) proc_append_u32(buf, &pos, (uint32_t)procs[i].ppid);
+        else proc_append(buf, &pos, "-");
+        proc_append(buf, &pos, procs[i].ppid > 9 ? "    " : "     ");
         int st = procs[i].state;
-        if (st < 0 || st > 5) st = 0;
+        if (st < 0 || st > 6) st = 0;
         proc_append(buf, &pos, state_names[st]);
-        proc_append(buf, &pos, "   ");
+        for (size_t k = strlen(state_names[st]); k < 10; k++) proc_append(buf, &pos, " ");
         proc_append(buf, &pos, procs[i].name);
         proc_append(buf, &pos, "\n");
     }
+    return pos;
+}
+
+static void proc_append_hex(char *buf, int *pos, uint32_t v, int digits) {
+    char t[9];
+    for (int i = 0; i < digits; i++) t[i] = "0123456789abcdef"[(v >> (4 * (digits - 1 - i))) & 0xF];
+    t[digits] = 0;
+    proc_append(buf, pos, t);
+}
+
+static int gen_devices(char *buf) {
+    int pos = 0;
+    proc_append(buf, &pos,
+        "Detected Devices:\n"
+        "  [CHRDEV] /dev/null     - null device (read=EOF, write=discard)\n"
+        "  [CHRDEV] /dev/zero     - zero byte source\n"
+        "  [CHRDEV] /dev/console  - kernel serial+VGA console\n"
+        "  [CHRDEV] /dev/random   - pseudo-random bytes (xorshift32)\n"
+        "  [CHRDEV] /dev/tty      - alias for /dev/console\n"
+        "  [BLKDEV] IDE disk 0    - ATA PIO mode (2 MB disk.img)\n"
+        "  [NETDEV] RTL8139       - 10/100 Ethernet (QEMU virtnet)\n"
+        "  [TIMER]  PIT 8254      - 100 Hz preemptive timer\n"
+        "  [INPUT]  PS/2 keyboard - scancode set 1 + ring buffer\n");
+    return pos;
+}
+
+static int gen_pci(char *buf) {
+    int pos = 0;
+    proc_append(buf, &pos, "PCI Devices:\n");
+    if (nic_dev.found) {
+        proc_append(buf, &pos, "  ");
+        proc_append_hex(buf, &pos, nic_dev.bus, 2);  proc_append(buf, &pos, ":");
+        proc_append_hex(buf, &pos, nic_dev.dev, 2);  proc_append(buf, &pos, ".");
+        proc_append_hex(buf, &pos, nic_dev.func, 1); proc_append(buf, &pos, "  Vendor: 0x");
+        proc_append_hex(buf, &pos, nic_dev.vendor_id, 4); proc_append(buf, &pos, " Device: 0x");
+        proc_append_hex(buf, &pos, nic_dev.device_id, 4); proc_append(buf, &pos, "  IO: 0x");
+        proc_append_hex(buf, &pos, nic_dev.io_base, 4);   proc_append(buf, &pos, "  IRQ: ");
+        proc_append_u32(buf, &pos, nic_dev.irq_line);
+        proc_append(buf, &pos, "  (Realtek RTL8139 Fast Ethernet)\n");
+    } else {
+        proc_append(buf, &pos, "  No PCI devices enumerated\n");
+    }
+    return pos;
+}
+
+static int gen_date(char *buf) {
+    int pos = 0;
+    char t[32];
+    rtc_format_time(t, sizeof(t));
+    proc_append(buf, &pos, t);
+    proc_append(buf, &pos, " UTC\n");
     return pos;
 }
 
@@ -233,6 +290,9 @@ static const struct proc_entry proc_entries[] = {
     { "mounts",   105, gen_mounts   },
     { "dmesg",    106, gen_dmesg    },
     { "net",      107, gen_net      },
+    { "devices",  108, gen_devices  },
+    { "pci",      109, gen_pci      },
+    { "date",     110, gen_date     },
 };
 
 #define PROC_ENTRY_COUNT  (sizeof(proc_entries) / sizeof(proc_entries[0]))

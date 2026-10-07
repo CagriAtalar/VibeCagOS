@@ -59,3 +59,28 @@ serial (`utest <n>`, `utest2 <a> <b>`, `uspawn <n>`) and greps the serial log. T
 * The Ring-0 shell moved from the large boot stack to a process kernel stack; 8 KiB overflowed into the
   neighbouring stack. `KERNEL_STACK` is 32 KiB and a canary at the bottom of every stack is checked on each
   context switch (`kernel stack overflow` panic instead of silent corruption).
+
+## User-space shell, spawn/wait, cwd, argv (M10/M11)
+**Boot flow now:** `kernel_main -> process_init -> kinit (kernel thread, pid 1) -> spawn "sh" (Ring 3) -> process_wait`.
+`run_shell()` is no longer on the boot path (it only runs in the `make KSHELL=1` debug build). When `sh` exits,
+kinit powers the machine off.
+
+**Process creation:** `process_create_user(name, image, size, argc, argv)` builds the initial user stack
+(argc / argv[] / strings, System-V style); `crt0.s` passes `(argc, argv)` to `user_main()`.
+Programs are still embedded flat binaries (`progs.c` table, `userblob.s`); ELF + filesystem exec are M12.
+
+**Syscalls added:** SPAWN, WAITPID, CHDIR, GETCWD, RENAME, KILL, CLEAR (contracts in `src/abi/syscall.h`).
+* `spawn(name, argv)` returns the child's pid; the child inherits the parent's cwd; fds 0/1/2 = console.
+* `waitpid(pid|-1, &status)` blocks on the *parent* (`block_on(parent)`, woken by `make_zombie(child)`),
+  reaps the zombie and frees its address space; `-ECHILD` if there are no children.
+* If a parent exits first its children are orphaned (`ppid = -1`); the idle thread reaps them when they die.
+* cwd is per process (`struct process::cwd`); `sysfile.c` makes every path absolute and normalises `.`/`..`
+  before it reaches the VFS, so the VFS's own global cwd is not used by user processes.
+
+**Shell (`src/user/sh.c`)** includes no kernel header. Builtins use syscalls only; system information comes from
+procfs (`/proc/{tasks,meminfo,cpuinfo,mounts,dmesg,net,uptime,version,devices,pci,date}`). Non-builtins are
+spawned and waited for; `&` runs them in the background and `wait` reaps them. `>` / `>>` work for builtins.
+
+## Tests
+`make test-all` = ring3, syscall, scheduler, usercopy, faults, stdio, fs, shell, proc (9 suites).
+The proc suite asserts that `FramesFree` is identical before and after spawn/kill/orphan scenarios.
