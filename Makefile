@@ -15,11 +15,12 @@ OBJCOPY := $(or $(shell command -v llvm-objcopy 2>/dev/null),objcopy)
 OBJDUMP := llvm-objdump
 
 # Compiler flags
-CFLAGS  := -std=c11 -O2 -g3 -Wall -Wextra \
+CFLAGS  := -std=c11 -O2 -g3 -Wall -Wextra -Werror \
             -m32 -fuse-ld=lld \
             -fno-stack-protector \
             -ffreestanding -nostdlib \
             -fno-pie -no-pie \
+            -MMD -MP \
             -Wno-unused-command-line-argument
 
 ASFLAGS := -m32
@@ -112,7 +113,8 @@ usercopy.o: $(KERNEL_DIR)/usercopy.c $(KERNEL_DIR)/usercopy.h $(KERNEL_DIR)/kern
 
 # ---- user space: separate build products, flat binaries linked at USER_BASE ----
 USER_CFLAGS := -std=c11 -O1 -m32 -ffreestanding -nostdlib -fno-pie -no-pie \
-               -fno-stack-protector -fuse-ld=lld -static -Wall -Wextra -Isrc/abi \
+               -fno-stack-protector -fuse-ld=lld -static -Wall -Wextra -Werror \
+               -MMD -MP -Isrc/abi \
                -Wno-unused-command-line-argument
 
 user_crt0.o: src/user/crt0.s
@@ -340,8 +342,9 @@ symbols: kernel.elf
 # ============================================================
 
 clean:
-	rm -f *.o *.elf *.map *.bin os.iso disk.img
+	rm -f *.o *.d *.elf *.map *.bin *.vbin os.iso disk.img
 	rm -rf isodir
+	rm -f tools/vbinpack
 
 help:
 	@echo "VibeCagOS Build Targets:"
@@ -356,3 +359,7 @@ help:
 	@echo ""
 	@echo "Requirements (WSL2 Ubuntu):"
 	@echo "  clang lld qemu-system-x86 grub-pc-bin grub-common xorriso mtools"
+
+# Auto-generated header dependencies from -MMD -MP (see CFLAGS/USER_CFLAGS).
+# The wildcard makes the first build (before any .d exists) work.
+-include $(wildcard *.d)
