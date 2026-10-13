@@ -4,7 +4,7 @@
 # usage: tests/all.sh [-v]     (-v prints every check, not just failures)
 cd "$(dirname "$0")/.." || exit 2
 VERBOSE=0; [ "$1" = "-v" ] && VERBOSE=1
-SUITES="ring3 syscall scheduler usercopy faults stdio fs shell pipe proc exec"
+SUITES="ring3 syscall scheduler usercopy faults stdio fs shell pipe proc lifecycle exec"
 pass=0; fail=0; failed=""
 for s in $SUITES persist; do
   if [ "$s" = persist ]; then out=$(sh tests/persist.sh 2>&1); else out=$(sh tests/run.sh "$s" 2>&1); fi

@@ -15,9 +15,26 @@
  * The heap starts at the first 4 KiB page after the kernel image.
  * Additional pages are requested from alloc_pages() as needed.
  *
- * Thread-safety: NOT re-entrant.  All callers must hold no spinlock
- * that might be acquired again inside alloc_pages(), or must call from
- * a single-threaded context.  For SMP, wrap with a spinlock.
+ * Concurrency contract (single CPU, today): kmalloc/kfree are NOT re-entrant
+ * and must never be called from interrupt context. Every current caller is in
+ * process/syscall context (pipe, exec, VFS). The kernel is not preemptible, so
+ * a context switch can never land in the middle of an allocator operation. For
+ * SMP, wrap with a spinlock.
+ *
+ * Lifecycle (important for leak accounting):
+ *   - The heap grows on demand by whole PMM frames (never fewer than 4).
+ *   - The heap NEVER returns frames to the PMM. A freed block is reused by later
+ *     kmalloc calls, so heap_frames is a high-water mark, not a leak.
+ *   - Therefore the leak invariants are:
+ *       FramesFree + heap_frames          constant across a lifecycle
+ *                                         (no process-owned frame leaked)
+ *       allocated_bytes                   constant across a lifecycle
+ *                                         (no heap block leaked)
+ *     and heap_frames itself is bounded by the largest simultaneously live
+ *     allocation set (e.g. one executable image), not by the number of
+ *     processes created.
+ *   - kmalloc_validate() walks every block and checks the structural
+ *     invariants (alignment, no overlap, full coalescing, counters, canaries).
  *
  * Design constraints (no over-engineering rule):
  *   - First-fit free list
@@ -62,9 +79,15 @@ struct kmalloc_stats {
     size_t num_allocs;       /* Total successful kmalloc calls */
     size_t num_frees;        /* Total kfree calls */
     size_t num_blocks;       /* Current block count (free + used) */
+    size_t heap_frames;      /* PMM frames currently owned by the heap */
 };
 
 void kmalloc_get_stats(struct kmalloc_stats *s);
+
+/* Check all heap invariants. 0 = consistent, else a distinct nonzero code
+ * (1 misaligned, 2 bad size, 3 overlap, 4 uncoalesced, 5 canary, 6 used
+ * counter, 7 capacity counter). */
+int kmalloc_validate(void);
 
 /* Print heap statistics via printf */
 void kmalloc_dump_stats(void);

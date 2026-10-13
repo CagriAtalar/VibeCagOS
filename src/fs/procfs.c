@@ -152,6 +152,20 @@ static int gen_meminfo(char *buf) {
     proc_append(buf, &pos, "HeapFree:    ");
     proc_append_u32(buf, &pos, (uint32_t)(ks.free_bytes / 1024));
     proc_append(buf, &pos, " kB\n");
+
+    /* Exact counters for leak accounting (see kmalloc.h "Lifecycle"). */
+    proc_append(buf, &pos, "HeapFrames:  ");
+    proc_append_u32(buf, &pos, (uint32_t)ks.heap_frames);
+    proc_append(buf, &pos, "\n");
+    proc_append(buf, &pos, "HeapBytes:   ");
+    proc_append_u32(buf, &pos, (uint32_t)ks.allocated_bytes);
+    proc_append(buf, &pos, "\n");
+    proc_append(buf, &pos, "HeapCheck:   ");
+    proc_append_u32(buf, &pos, (uint32_t)kmalloc_validate());
+    proc_append(buf, &pos, "\n");
+    proc_append(buf, &pos, "FrameBal:    ");   /* FramesFree + HeapFrames */
+    proc_append_u32(buf, &pos, (uint32_t)(pmm_get_free_frames() + ks.heap_frames));
+    proc_append(buf, &pos, "\n");
     return pos;
 }
 

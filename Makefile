@@ -1,7 +1,7 @@
 .PHONY: all clean distclean run run-window run-gdb debug image disk help run-smp test \
         test-ring3 test-syscall test-scheduler test-usercopy test-faults \
-        test-stdio test-fs test-shell test-pipe test-proc test-exec test-persist test-all \
-        check-boundary kernel user tools
+        test-stdio test-fs test-shell test-pipe test-proc test-lifecycle test-exec test-persist test-all \
+        host-test check-boundary kernel user tools
 
 # ============================================================
 # VibeCagOS Build System
@@ -323,6 +323,8 @@ test-pipe: os.iso
 	@tests/run.sh pipe
 test-proc: os.iso
 	@tests/run.sh proc
+test-lifecycle: os.iso
+	@tests/run.sh lifecycle
 test-exec: os.iso
 	@tests/run.sh exec
 # Two boots on a disposable image: proves VibeFS data survives a reboot.

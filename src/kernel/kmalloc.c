@@ -47,9 +47,14 @@ struct heap_block {
     uint32_t           canary; /* HEAP_CANARY for allocated blocks */
 #endif
     struct heap_block *next;   /* Next block in the free list (or NULL) */
-};
+} __attribute__((aligned(HEAP_ALIGN)));   /* header size must keep data 8-aligned */
 
 #define HDR_SIZE  (sizeof(struct heap_block))
+
+/* i386: {size,free,next} is 12 bytes without the pad above, which made every
+ * returned pointer 4 mod 8. Never let that regress silently. */
+_Static_assert(sizeof(struct heap_block) % HEAP_ALIGN == 0,
+               "heap header must be a multiple of the heap alignment");
 
 /* Pointer arithmetic helpers */
 #define BLK_DATA(b)   ((void *)((uint8_t *)(b) + HDR_SIZE))
@@ -64,6 +69,7 @@ static size_t             heap_total = 0;
 static size_t             heap_used  = 0;
 static size_t             heap_nalloc = 0;
 static size_t             heap_nfree  = 0;
+static size_t             heap_frames = 0;   /* PMM frames currently owned by the heap */
 
 /* =========================================================================
  * Internal helpers
@@ -118,6 +124,7 @@ static bool heap_grow(uint32_t pages) {
 #endif
 
     heap_total += blk->size;
+    heap_frames += pages;
 
     /* Append to end of list */
     if (!heap_head) {
@@ -260,12 +267,45 @@ void kmalloc_get_stats(struct kmalloc_stats *s) {
     s->free_bytes      = heap_total > heap_used ? heap_total - heap_used : 0;
     s->num_allocs      = heap_nalloc;
     s->num_frees       = heap_nfree;
+    s->heap_frames     = heap_frames;
 
     /* Count blocks */
     size_t count = 0;
     for (struct heap_block *b = heap_head; b; b = b->next)
         count++;
     s->num_blocks = count;
+}
+
+/*
+ * Walk the whole block list and check the allocator's invariants. Returns 0
+ * when the heap is consistent, otherwise a distinct positive code per
+ * violated invariant (so a failing test says *what* broke).
+ */
+int kmalloc_validate(void) {
+    size_t used = 0, total = 0;
+    for (struct heap_block *b = heap_head; b; b = b->next) {
+        if (((uintptr_t)b & (HEAP_ALIGN - 1u)) != 0) return 1;      /* misaligned header */
+        if (b->size == 0 || (b->size & (HEAP_ALIGN - 1u)) != 0 ) {
+            /* region tails are page-multiples minus HDR_SIZE; HDR_SIZE is a
+             * multiple of HEAP_ALIGN, so every size is too */
+            return 2;
+        }
+        if (b->next) {
+            /* next must lie after this block's data (no overlap) */
+            if ((uintptr_t)b->next < (uintptr_t)BLK_DATA(b) + b->size) return 3;
+            /* fully coalesced: two adjacent-in-memory free blocks never coexist */
+            if (b->free && b->next->free && blk_contiguous(b)) return 4;
+        }
+#ifdef KMALLOC_DEBUG
+        if (!b->free && b->canary != HEAP_CANARY) return 5;
+#endif
+        total += b->size + HDR_SIZE;
+        if (!b->free) used += b->size;
+    }
+    if (used != heap_used) return 6;      /* allocated-bytes counter drifted */
+    /* Every byte of every region is either a header or block data. */
+    if (total != heap_frames * (size_t)PAGE_SIZE) return 7;
+    return 0;
 }
 
 void kmalloc_dump_stats(void) {
