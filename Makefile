@@ -1,6 +1,6 @@
-.PHONY: all clean run run-window run-gdb debug image disk help run-smp test \
+.PHONY: all clean distclean run run-window run-gdb debug image disk help run-smp test \
         test-ring3 test-syscall test-scheduler test-usercopy test-faults \
-        test-stdio test-fs test-shell test-pipe test-proc test-exec test-all \
+        test-stdio test-fs test-shell test-pipe test-proc test-exec test-persist test-all \
         check-boundary kernel user tools
 
 # ============================================================
@@ -267,13 +267,20 @@ os.iso: kernel.elf
 	grub-mkrescue -o os.iso isodir
 
 # Create disk image (16 MiB, matching VIBEFS_TOTAL_SECTORS in src/fs/vibefs.h).
-# Recreated when the size does not match so an old smaller image cannot be
-# written past its end by the larger filesystem.
+# An existing image is NEVER overwritten. If one has the wrong size (the
+# filesystem would write past the end of a smaller image) we stop and tell the
+# user to migrate or delete it deliberately (`make distclean`).
 DISK_BYTES := 16777216
+.PHONY: disk.img
 disk.img:
-	@if [ ! -f disk.img ] || [ "$$(stat -c%s disk.img 2>/dev/null)" != "$(DISK_BYTES)" ]; then \
+	@if [ ! -f disk.img ]; then \
 		echo "Creating 16 MiB disk.img"; \
 		dd if=/dev/zero of=disk.img bs=1M count=16 status=none; \
+	elif [ "$$(stat -c%s disk.img 2>/dev/null)" != "$(DISK_BYTES)" ]; then \
+		echo "ERROR: disk.img is $$(stat -c%s disk.img) bytes, expected $(DISK_BYTES)."; \
+		echo "       Refusing to overwrite it. Back it up, then 'make distclean' or"; \
+		echo "       move it aside (this kernel needs a 16 MiB image)."; \
+		exit 1; \
 	fi
 
 # ============================================================
@@ -294,30 +301,32 @@ test: os.iso disk.img
 	@printf '\nhelp\npwd\ndate\nfree\ndevices\npci\nls\necho VibeCagOS_Automated_Test_OK > /tmp/test.txt\ncat /tmp/test.txt\ncp /tmp/test.txt /tmp/copy.txt\nhead /tmp/copy.txt\nstat /tmp/copy.txt\ncat /proc/version\ncat /proc/meminfo\ncat /etc/version\ndmesg\nexit\n' | timeout 12 $(QEMU) $(QEMU_COMMON) -display none 2>&1
 
 # ---- automated Ring-3 tests (serial output is checked by tests/run.sh) ----
-test-ring3: os.iso disk.img
+# Every test boots os.iso on its own mktemp disk image: the developer's
+# disk.img is never read or written by any test target.
+test-ring3: os.iso
 	@tests/run.sh ring3
-test-syscall: os.iso disk.img
+test-syscall: os.iso
 	@tests/run.sh syscall
-test-scheduler: os.iso disk.img
+test-scheduler: os.iso
 	@tests/run.sh scheduler
-test-usercopy: os.iso disk.img
+test-usercopy: os.iso
 	@tests/run.sh usercopy
-test-faults: os.iso disk.img
+test-faults: os.iso
 	@tests/run.sh faults
-test-stdio: os.iso disk.img
+test-stdio: os.iso
 	@tests/run.sh stdio
-test-fs: os.iso disk.img
+test-fs: os.iso
 	@tests/run.sh fs
-test-shell: os.iso disk.img
+test-shell: os.iso
 	@tests/run.sh shell
-test-pipe: os.iso disk.img
+test-pipe: os.iso
 	@tests/run.sh pipe
-test-proc: os.iso disk.img
+test-proc: os.iso
 	@tests/run.sh proc
-test-exec: os.iso disk.img
+test-exec: os.iso
 	@tests/run.sh exec
-# Two boots on one disk image: proves VibeFS data survives a reboot.
-test-persist: os.iso disk.img
+# Two boots on a disposable image: proves VibeFS data survives a reboot.
+test-persist: os.iso
 	@tests/persist.sh
 test-all: test-ring3 test-syscall test-scheduler test-usercopy test-faults test-stdio \
           test-fs test-shell test-pipe test-proc test-exec test-persist
@@ -341,10 +350,16 @@ symbols: kernel.elf
 # Utility
 # ============================================================
 
+# clean removes generated build products only. disk.img is persistent user
+# data (a VibeFS volume) and is NOT touched; use `make distclean` for that.
 clean:
-	rm -f *.o *.d *.elf *.map *.bin *.vbin os.iso disk.img
+	rm -f *.o *.d *.elf *.map *.bin *.vbin os.iso
 	rm -rf isodir
 	rm -f tools/vbinpack
+
+# DESTRUCTIVE: also deletes disk.img and every file on it.
+distclean: clean
+	rm -f disk.img
 
 help:
 	@echo "VibeCagOS Build Targets:"
@@ -355,7 +370,9 @@ help:
 	@echo "  make debug       Run with GDB stub (port 1234, CPU halted)"
 	@echo "  make disassemble Disassemble kernel.elf"
 	@echo "  make symbols     List kernel symbols"
-	@echo "  make clean       Remove build artifacts"
+	@echo "  make test-all    Run all QEMU suites (disposable disks; disk.img untouched)"
+	@echo "  make clean       Remove build artifacts (keeps disk.img)"
+	@echo "  make distclean   clean + DELETE disk.img (destroys persistent data)"
 	@echo ""
 	@echo "Requirements (WSL2 Ubuntu):"
 	@echo "  clang lld qemu-system-x86 grub-pc-bin grub-common xorriso mtools"

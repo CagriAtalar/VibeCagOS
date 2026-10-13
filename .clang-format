@@ -1,0 +1,17 @@
+# VibeCagOS .clang-format
+# Brace on the same line, 4-space indent, 100 columns. Kept deliberately close
+# to the existing hand-written style so `clang-format` produces small diffs.
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+IndentCaseLabels: false
+PointerAlignment: Right
+SortIncludes: false
+SpaceAfterCStyleCast: false

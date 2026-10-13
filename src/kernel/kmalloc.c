@@ -25,7 +25,8 @@
  */
 
 #include "kmalloc.h"
-#include "kernel.h"   /* alloc_pages, PANIC */
+#include "kernel.h"   /* PANIC */
+#include "pmm.h"      /* pmm_alloc_frames / pmm_free_frames */
 #include "common.h"
 
 /* =========================================================================
@@ -69,17 +70,44 @@ static size_t             heap_nfree  = 0;
  * ========================================================================= */
 
 /*
- * Grow the heap by `pages` pages.
- * Adds a new free block at the end of the list.
+ * Two list-adjacent blocks may be merged ONLY if they are also adjacent in
+ * memory. heap_grow() appends regions obtained from the frame allocator, which
+ * (being a bitmap) need not hand out contiguous frames; merging across a gap
+ * would fuse in foreign pages (page tables, user frames...).
  */
-static void heap_grow(uint32_t pages) {
+static inline bool blk_contiguous(const struct heap_block *a) {
+    return (const uint8_t *)BLK_DATA(a) + a->size == (const uint8_t *)a->next;
+}
+
+static void heap_coalesce(void) {
+    struct heap_block *cur = heap_head;
+    while (cur && cur->next) {
+        if (cur->free && cur->next->free && blk_contiguous(cur)) {
+            cur->size += HDR_SIZE + cur->next->size;
+            cur->next  = cur->next->next;
+        } else {
+            cur = cur->next;
+        }
+    }
+}
+
+/*
+ * Grow the heap by `pages` pages.
+ * Adds a new free block at the end of the list. Returns false (heap
+ * unchanged) when the frame allocator cannot satisfy the request.
+ */
+static bool heap_grow(uint32_t pages) {
     if (pages == 0) pages = HEAP_GROW_PAGES;
 
-    void *region = (void *)alloc_pages(pages);
+    void *region = (void *)pmm_alloc_frames(pages);   /* 0 on failure */
+    if (!region)
+        return false;
     size_t region_size = (size_t)pages * PAGE_SIZE;
 
-    if (region_size <= HDR_SIZE)
-        return;
+    if (region_size <= HDR_SIZE) {
+        pmm_free_frames((paddr_t)region, pages);
+        return false;
+    }
 
     struct heap_block *blk = (struct heap_block *)region;
     blk->size = region_size - HDR_SIZE;
@@ -94,7 +122,7 @@ static void heap_grow(uint32_t pages) {
     /* Append to end of list */
     if (!heap_head) {
         heap_head = blk;
-        return;
+        return true;
     }
 
     struct heap_block *cur = heap_head;
@@ -102,17 +130,8 @@ static void heap_grow(uint32_t pages) {
         cur = cur->next;
     cur->next = blk;
 
-    /* Coalesce with previous if it's free */
-    cur = heap_head;
-    while (cur && cur->next) {
-        if (cur->free && cur->next->free) {
-            /* Merge cur and cur->next */
-            cur->size += HDR_SIZE + cur->next->size;
-            cur->next  = cur->next->next;
-        } else {
-            cur = cur->next;
-        }
-    }
+    heap_coalesce();
+    return true;
 }
 
 /* =========================================================================
@@ -121,11 +140,17 @@ static void heap_grow(uint32_t pages) {
 
 void kmalloc_init(void) {
     /* Allocate initial heap region */
-    heap_grow(HEAP_GROW_PAGES);
+    if (!heap_grow(HEAP_GROW_PAGES))
+        PANIC("kmalloc_init: no physical memory for the initial heap");
 }
 
 void *kmalloc(size_t size) {
     if (size == 0)
+        return NULL;
+
+    /* Overflow-safe: reject anything that cannot be rounded/headered without
+     * wrapping (a wrapped size would hand out a tiny block for a huge ask). */
+    if (size > (size_t)-1 - HDR_SIZE - PAGE_SIZE - HEAP_ALIGN)
         return NULL;
 
     /* Round up to alignment */
@@ -170,7 +195,8 @@ void *kmalloc(size_t size) {
     if (pages_needed < HEAP_GROW_PAGES)
         pages_needed = HEAP_GROW_PAGES;
 
-    heap_grow(pages_needed);
+    if (!heap_grow(pages_needed))
+        return NULL;   /* out of physical memory: the caller must cope */
 
     /* Retry once — if it fails now, we're truly out of memory */
     cur = heap_head;
@@ -225,53 +251,7 @@ void kfree(void *ptr) {
     blk->free = true;
     heap_nfree++;
 
-    /* Coalesce adjacent free blocks (forward pass only — sufficient for correctness) */
-    struct heap_block *cur = heap_head;
-    while (cur && cur->next) {
-        if (cur->free && cur->next->free) {
-            cur->size += HDR_SIZE + cur->next->size;
-            cur->next  = cur->next->next;
-        } else {
-            cur = cur->next;
-        }
-    }
-}
-
-void *kmalloc_aligned(size_t size, size_t align) {
-    if (size == 0 || align == 0)
-        return NULL;
-
-    /* align must be power of two */
-    if (align & (align - 1))
-        return NULL;
-
-    if (align <= HEAP_ALIGN)
-        return kmalloc(size);
-
-    /*
-     * Over-allocate by (align - 1 + HDR_SIZE) so we can find an aligned
-     * point inside the allocation.  We store the original pointer just
-     * before the aligned region so kfree can recover it.
-     *
-     * NOTE: This is a simple implementation.  We allocate extra space and
-     * waste some bytes to guarantee alignment.  For the hobby OS use-case
-     * (page-aligned DMA buffers etc.) this is acceptable.
-     *
-     * Callers that require page-aligned memory (DMA) should use alloc_pages()
-     * directly; it already returns page-aligned addresses.
-     */
-    size_t total = size + align - 1 + sizeof(void *);
-    uint8_t *raw = (uint8_t *)kmalloc(total);
-    if (!raw)
-        return NULL;
-
-    /* Find aligned address */
-    uintptr_t raw_addr  = (uintptr_t)raw + sizeof(void *);
-    uintptr_t aligned   = (raw_addr + align - 1) & ~(align - 1);
-    void    **store     = (void **)(aligned - sizeof(void *));
-    *store              = raw;   /* stash original pointer */
-
-    return (void *)aligned;
+    heap_coalesce();
 }
 
 void kmalloc_get_stats(struct kmalloc_stats *s) {

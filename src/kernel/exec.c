@@ -31,38 +31,56 @@
 #include "klog.h"
 #include "sysfile.h"
 #include "usercopy.h"
+#include "kmalloc.h"
 #include "../fs/vfs.h"
 #include "../abi/syscall.h"
 
-/* Largest program image we will read into a kernel buffer. */
-#define EXEC_MAX_IMAGE (512 * 1024)
+/* Largest program image we will read into a kernel buffer (resource limit,
+ * not a static array: the buffer is allocated per load, sized to the file). */
+#define EXEC_MAX_IMAGE (16u * 1024 * 1024)
 
 /* Defined below: spawn with an explicit fd map for the child. */
 int sys_spawnfds(const char *uname, const char *const *uargv, const int map[3]);
 
-/* Scratch buffer for the image being loaded. Static on purpose: one exec at a
- * time is enough (a second exec in the same process can only happen after the
- * first one has left this function and entered Ring 3). */
-static uint8_t exec_image[EXEC_MAX_IMAGE];
+/* A program image in kernel memory. `owned` is non-NULL when `data` was
+ * kmalloc'd for this load (and must be released); embedded images are static
+ * and have owned == NULL. */
+struct loaded_image {
+    const uint8_t *data;
+    uint32_t       size;
+    void          *owned;
+};
 
-/* Read an absolute VFS path into the scratch buffer. Returns the image and
- * its size, or a negative errno. The caller keeps running on failure. */
-static int load_vfs_file(const char *path, const uint8_t **out, uint32_t *out_size) {
+static void image_release(struct loaded_image *li) {
+    if (li->owned) kfree(li->owned);
+    li->owned = NULL;
+    li->data  = NULL;
+}
+
+/* Read an absolute VFS path into a freshly allocated buffer. Returns 0 or a
+ * negative errno. The caller keeps running on failure and owns the image on
+ * success (image_release). */
+static int load_vfs_file(const char *path, struct loaded_image *li) {
     struct vstat st;
     int r = vfs_stat(path, &st);
     if (r < 0) return vfs_err(r);
     if (st.type == VFS_TYPE_DIR) return -E_ISDIR;
-    if (st.size == 0 || st.size > sizeof(exec_image)) return -E_NOMEM;
+    if (st.size == 0) return -E_NOEXEC;
+    if (st.size > EXEC_MAX_IMAGE) return -E_NOMEM;
+
+    uint8_t *buf = kmalloc(st.size);
+    if (!buf) return -E_NOMEM;
 
     struct file *f = vfs_open(path, FILE_READ, 0);
-    if (!f) return -E_NOENT;
-    int n = vfs_read(f, exec_image, st.size);
+    if (!f) { kfree(buf); return -E_NOENT; }
+    int n = vfs_read(f, buf, st.size);
     vfs_close(f);
-    if (n < 0) return vfs_err(n);
-    if ((uint32_t)n != st.size) return -E_IO;
+    if (n < 0) { kfree(buf); return vfs_err(n); }
+    if ((uint32_t)n != st.size) { kfree(buf); return -E_IO; }
 
-    *out = exec_image;
-    *out_size = (uint32_t)n;
+    li->data  = buf;
+    li->size  = (uint32_t)n;
+    li->owned = buf;
     return 0;
 }
 
@@ -71,13 +89,14 @@ static int load_vfs_file(const char *path, const uint8_t **out, uint32_t *out_si
  * the embedded table, so the filesystem is authoritative but a deleted /bin
  * entry still boots from the built-in copy. Returns the image and its size,
  * or a negative errno. */
-static int load_image(const char *name, const uint8_t **out, uint32_t *out_size) {
+static int load_image(const char *name, struct loaded_image *li) {
+    li->data = NULL; li->size = 0; li->owned = NULL;
     if (strchr(name, '/')) {
         char path[VFS_PATH_MAX];
         int r = path_resolve(current_proc->cwd[0] ? current_proc->cwd : "/",
                              name, path, sizeof(path));
         if (r < 0) return r;
-        return load_vfs_file(path, out, out_size);
+        return load_vfs_file(path, li);
     }
 
     /* Bare name: disk first, embedded fallback. stat first so a corrupt /bin
@@ -90,12 +109,12 @@ static int load_image(const char *name, const uint8_t **out, uint32_t *out_size)
     binpath[n] = '\0';
     struct vstat st;
     if (vfs_stat(binpath, &st) == 0 && st.size > 0)
-        return load_vfs_file(binpath, out, out_size);
+        return load_vfs_file(binpath, li);
 
     const struct user_prog *prog = user_prog_find(name);
     if (!prog) return -E_NOENT;
-    *out      = prog->start;
-    *out_size = (uint32_t)(prog->end - prog->start);
+    li->data  = prog->start;
+    li->size  = (uint32_t)(prog->end - prog->start);
     return 0;
 }
 
@@ -107,10 +126,10 @@ static int load_image(const char *name, const uint8_t **out, uint32_t *out_size)
  */
 struct process *kernel_spawn_path(const char *path, const char *name,
                                   int argc, const char *const *argv) {
-    const uint8_t *image;
-    uint32_t size;
-    if (load_vfs_file(path, &image, &size) < 0) return NULL;
-    struct process *c = process_create_user(name, image, size, argc, argv);
+    struct loaded_image li;
+    if (load_vfs_file(path, &li) < 0) return NULL;
+    struct process *c = process_create_user(name, li.data, li.size, argc, argv);
+    image_release(&li);   /* process_create_user copied what it needed */
     if (!c) return NULL;
     uint32_t fl = irq_save();
     c->ppid = current_proc ? current_proc->pid : 0;
@@ -158,15 +177,15 @@ int sys_spawnfds(const char *uname, const char *const *uargv,
     if (r < 0) return r;
     if (argc == 0) { argp[0] = name; argc = 1; }
 
-    const uint8_t *image;
-    uint32_t size;
-    r = load_image(name, &image, &size);
+    struct loaded_image li;
+    r = load_image(name, &li);
     if (r < 0) return r;
 
     /* ps shows the basename: "/bin/sh" runs as "sh". */
     const char *base = strrchr(name, '/');
     base = base ? base + 1 : name;
-    struct process *c = process_create_user(base, image, size, argc, argp);
+    struct process *c = process_create_user(base, li.data, li.size, argc, argp);
+    image_release(&li);
     if (!c) return -E_NOMEM;
     uint32_t fl = irq_save();
     c->ppid = current_proc->pid;
@@ -246,21 +265,20 @@ int sys_exec(const char *upath, const char *const *uargv) {
     if (r < 0) return vfs_err(r);
     if (st.type == VFS_TYPE_DIR) return -E_ISDIR;
     if (st.size == 0) return -E_NOEXEC;
-    if (st.size > sizeof(exec_image)) return -E_NOMEM;
 
-    struct file *f = vfs_open(path, FILE_READ, 0);
-    if (!f) return -E_NOENT;
-    int n = vfs_read(f, exec_image, st.size);
-    vfs_close(f);
-    if (n < 0) return vfs_err(n);
-    if ((uint32_t)n != st.size) return -E_IO;
+    struct loaded_image li;
+    r = load_vfs_file(path, &li);
+    if (r < 0) return r;
+    int n = (int)li.size;
 
     /* New address space. */
     uint32_t *pd = vmm_create_address_space();
-    if (!pd) return -E_NOMEM;
+    if (!pd) { image_release(&li); return -E_NOMEM; }
 
     uint32_t entry = 0;
-    if (vbin_load(pd, exec_image, (size_t)n, &entry) < 0) {
+    int lr = vbin_load(pd, li.data, (size_t)n, &entry);
+    image_release(&li);   /* the image is now in the new address space */
+    if (lr < 0) {
         KWARN("EXEC", "pid %d: %s rejected: %s", current_proc->pid, path, vbin_error());
         vmm_destroy_address_space(pd);
         return -E_NOEXEC;

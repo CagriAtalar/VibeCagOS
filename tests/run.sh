@@ -19,11 +19,13 @@ case $SUITE in
   usercopy)  CMDS="utest 7@ps" ;;
   stdio)     CMDS="utest 13@utest 14<abc@utest 16@utest 16@ps" ;;
   shell)     CMDS="pwd@mkdir /a@cd /a@pwd@echo hi there > f.txt@cat f.txt@cp f.txt g.txt@ls@mv g.txt h.txt@stat h.txt@head h.txt@cd ..@rm /a/f.txt@rm /a/h.txt@rmdir /a@ls@uname@ps@cat /proc/meminfo@nosuch@kill 9999@ls /nonexistent@cd /nonexistent@write w.txt hello world@cat w.txt@echo more >> w.txt@cat w.txt@hexdump w.txt@rm w.txt@utest 19@pwd@ls /bin@echo piped | cat@date@devices" ;;
-  # Pids: 0 idle, 1 kinit (kernel), 2 init (Ring 3), 3 sh. ps/kill/sleep are
-  # ordinary /bin programs now, so they consume pids too; the sequence below is
-  # fixed, so the ids stay deterministic. utest 17 & = pid 4; ps = 5; kill = 6;
-  # ps = 7; utest 18 = 8 (children 9,10); utest 20 = 11, its orphaned sleeper = 12.
-  proc)      CMDS="free@utest 17 &@ps@kill 4@ps@wait@utest 18@utest 20@ps@kill 12@sleep 300@ps@free" ;;
+  # Pids: 0 idle, 1 kinit (kernel), 2 init (Ring 3), 3 sh, 4 = warm-up `utest 0`
+  # (exec images are heap-allocated, so the first large load grows the heap once;
+  # the warm-up makes the FramesFree baseline steady-state). ps/kill/sleep are
+  # ordinary /bin programs and consume pids too; the sequence is fixed, so ids
+  # stay deterministic: utest 17 & = pid 5; ps = 6; kill = 7; ps = 8; utest 18 = 9
+  # (children 10,11); utest 20 = 12, its orphaned sleeper = 13.
+  proc)      CMDS="utest 0@free@utest 17 &@ps@kill 5@ps@wait@utest 18@utest 20@ps@kill 13@sleep 300@ps@free" ;;
   fs)        CMDS="utest 15@utest 28@utest 15@utest 16@ps" ;;
   faults)    CMDS="utest 3@utest 8@utest 9@utest 10@utest 11@utest 0@ps" ;;
   pipe)      CMDS="utest 21@utest 25 | utest 26@utest 25 | cat@ls /bin | cat@utest 1 > /redir.txt@cat /redir.txt@ps" ;;
@@ -102,7 +104,7 @@ case $SUITE in
   expect '^-  g.txt'                       'cp created g.txt (mv checked by stat h.txt)'
   expect 'Size: 9'                         'stat'
   reject '^d  a$'                          'rm + rmdir removed /a'
-  expect 'VibeCagOS 0.5.0'                 'uname (procfs)'
+  expect 'VibeCagOS 0\.6\.0'               'uname (procfs)'
   expect 'RUNNING   ps'                    'ps runs as its own process in /bin'
   expect 'BLOCKED   sh'                    'ps sees the shell blocked in waitpid'
   expect '^-  pwd$'                        'pwd is an installed /bin program'
@@ -126,11 +128,11 @@ case $SUITE in
   expect 'Detected Devices'                'devices'
   reject 'PANIC|EXCEPTION|killed'          'no panic / no kill' ;;
  proc)
-  expect '\[pid 4\] started'               'background spawn gets pid 4 (0 idle, 1 kinit, 2 init, 3 sh)'
+  expect '\[pid 5\] started'               'background spawn gets pid 5 (0 idle, 1 kinit, 2 init, 3 sh, 4 warm-up)'
   expect 'SLEEPING  utest'                 'ps shows sleeping child'
-  expect 'kill: terminated pid 4'          'kill'
+  expect 'kill: terminated pid 5'          'kill'
   expect 'ZOMBIE    utest'                 'killed child is a zombie until reaped'
-  expect '\[pid 4\] exit code -9'          'wait reaps it with status -9'
+  expect '\[pid 5\] exit code -9'          'wait reaps it with status -9'
   expect 'T18: spawned=1'                  'Ring 3 spawn x2'
   expect 'T18: wait1=1 st1=42 wait2=1 st2=0' 'waitpid(pid) and waitpid(-1) return child status'
   expect 'T18: no_more_children=-10'      'waitpid with no children -> ECHILD'
@@ -139,7 +141,7 @@ case $SUITE in
   expect 'T18: wait_badptr=-14'            'waitpid bad pointer -> EFAULT'
   expect '\[pid [0-9]+\] exit code 7'      'parent exit code'
   expect 'T20: child_spawned=1'            'orphan scenario: parent exits first'
-  expect 'kill: terminated pid 12'         'orphaned child (ppid -1) can be killed by a /bin program'
+  expect 'kill: terminated pid 13'         'orphaned child (ppid -1) can be killed by a /bin program'
   nframes=$(grep -a '^FramesFree' "$LOG" | awk '{print $2}' | sort -u | wc -l)
   if [ "$nframes" = 1 ]; then echo "  PASS  no frame leak (FramesFree identical before/after)"; else echo "  FAIL  frame leak: $(grep -a '^FramesFree' "$LOG" | tr '\n' ' ')"; FAIL=1; fi
   reject 'PANIC|EXCEPTION'                 'no panic' ;;

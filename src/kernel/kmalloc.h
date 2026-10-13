@@ -48,11 +48,9 @@ void *kmalloc(size_t size);
 void  kfree(void *ptr);
 
 /*
- * kmalloc_aligned — allocate memory aligned to `align` bytes.
- * align must be a power of two and >= 8.
- * Returns NULL on failure.
+ * (kmalloc_aligned was removed: kfree() could not undo its alignment padding.
+ *  Page-aligned/DMA memory comes from pmm_alloc_frames() directly.)
  */
-void *kmalloc_aligned(size_t size, size_t align);
 
 /*
  * kmalloc_stats — fills in statistics about the heap.

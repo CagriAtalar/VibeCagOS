@@ -36,8 +36,9 @@ struct vbin_header {
     uint32_t flags;       /* must be 0 */
 } __attribute__((packed));
 
-/* Largest image span we will map (1 MiB of user address space). */
-#define VBIN_MAX_SPAN (1u << 20)
+/* Largest image span we will map (16 MiB of the 256 MiB user window; a
+ * resource limit, bounded in practice by the 64 MiB frame pool). */
+#define VBIN_MAX_SPAN (16u << 20)
 
 /* Load a VBIN image into the page directory `pd`. On success stores the entry
  * point in *entry and returns 0; on failure returns a negative errno and maps

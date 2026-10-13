@@ -1,7 +1,8 @@
 # VibeCagOS — Feature Status
 
-> **Updated:** 2026-10-07 · **Build:** clang/lld, 0 warnings · **Tests:**
-> `make test-all`, 12 suites, 0 failures
+> **Updated:** 2026-10-13 · **Build:** clang/lld `-Werror`, 0 warnings · **Tests:**
+> 12 suites via `tests/all.sh` / `make test-all`: 12 PASS (run in WSL2 Ubuntu,
+> QEMU 8-era, disposable disk images; `disk.img` untouched)
 >
 > Every row below was read out of the source or asserted by a test. Where a
 > feature exists but is incomplete, it says so.
@@ -35,9 +36,9 @@
 | Bitmap physical frame allocator | done | zero-filled frames, count in `/proc/meminfo` |
 | 2-level paging, identity mapped kernel | done | `CR0.PG` + `CR0.WP` |
 | Per-process page directories | done | kernel PDEs shared, user PDEs private |
-| Kernel heap (kmalloc/kfree/coalesce/aligned) | done | `heap`, `/proc/meminfo` |
+| Kernel heap (kmalloc/kfree/coalesce) | done | merges only memory-contiguous blocks; overflow-safe sizes; OOM returns NULL (no panic) after init. `kmalloc_aligned` removed (unfreeable). No host/QEMU unit test of the heap itself yet (IMPLEMENTED_BUT_UNVERIFIED beyond the suites exercising it) |
 | User pages confined to `[USER_BASE, USER_END)` | done | enforced in `vmm_map_page` |
-| VBIN loader, text RO / data RW / BSS zero | done | `src/kernel/vbin.c`, `tools/vbinpack`, `test-exec` |
+| VBIN loader, text RO / data RW / BSS zero | done | `src/kernel/vbin.c`, `tools/vbinpack`, `test-exec`. Executable read into a per-load heap buffer (limit 16 MiB, no static buffer); span cap 16 MiB. Multi-MB images are NOT yet exercised by a test |
 | Physical memory discovery | not done | 64 MiB pool is a linker constant |
 | Copy-on-write, demand paging, PAE/NX | not done | out of scope for this milestone |
 
@@ -112,3 +113,14 @@ register state, preemption without yield, pointer validation, page-fault
 containment, fd semantics, filesystem round trips, reboot persistence,
 pipelines, zombie/orphan lifetime and VBIN/exec behaviour — not just that the
 OS boots.
+## Master-plan items NOT started (as of 2026-10-13)
+
+x86_64 target / Limine-or-Multiboot2 boot / UEFI, real memory-map-driven PMM, 4-level paging + NX, threads, SMP, VBIN v2 (segment table), libc/malloc/mmap, dup/dup2, permission enforcement, virtio-blk, DHCP/TCP/sockets, framebuffer + compositor, Doom. State for all of these: NOT_IMPLEMENTED.
+
+## Build hygiene
+
+- `make clean` no longer deletes `disk.img`; `make distclean` does (destructive).
+- `make disk.img` refuses to overwrite an existing image of the wrong size.
+- Test targets no longer depend on `disk.img`; every suite uses a `mktemp` image.
+- `tests/all.sh` runs all 12 suites. Version string lives only in `src/kernel/version.h`.
+
